@@ -32,6 +32,7 @@ We propose <b>Follow-Your-Shape</b>, a training-free and mask-free framework tha
 <!-- - [2025.3.12] Thanks to @[smthemex](https://github.com/smthemex) for integrating KV-Edit into [ComfyUI](https://github.com/smthemex/ComfyUI_KV_Edit)!
 - [2025.3.4] We update "attention scale" feature to reduce the discontinuity with the background.
 - [2025.2.26] Our paper is featured in [huggingface Papers](https://huggingface.co/papers/2502.17363)! -->
+- [2025.1.25] 🎉 Our paper is accepted by ICLR 2026.
 - [2025.8.11] Code released!
 - [2025.8.11] Paper released!
 <!-- - [2025.2.25] More results can be found in our [project page](https://xilluill.github.io/projectpages/KV-Edit/)! -->
@@ -152,12 +153,12 @@ Please refer to the paper for the rationale and recommended values of the hyperp
 
 If you find our work helpful, please **star 🌟** this repo and **cite 📑** our paper. Thanks for your support!
 
-<!-- ```
-@article{wang2024taming,
-  title={Taming Rectified Flow for Inversion and Editing},
-  author={Wang, Jiangshan and Pu, Junfu and Qi, Zhongang and Guo, Jiayi and Ma, Yue and Huang, Nisha and Chen, Yuxin and Li, Xiu and Shan, Ying},
-  journal={arXiv preprint arXiv:2411.04746},
-  year={2024}
+```
+@article{long2025follow,
+  title={Follow-your-shape: Shape-aware image editing via trajectory-guided region control},
+  author={Long, Zeqian and Zheng, Mingzhe and Feng, Kunyu and Zhang, Xinhua and Liu, Hongyu and Yang, Harry and Zhang, Linfeng and Chen, Qifeng and Ma, Yue},
+  journal={arXiv preprint arXiv:2508.08134},
+  year={2025}
 }
-``` -->
+```
 
