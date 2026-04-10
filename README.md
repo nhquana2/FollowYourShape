@@ -149,7 +149,6 @@ python edit.py  --source_prompt [your source image prompt] \
 Please refer to the paper for the rationale and recommended values of the hyperparameters.
 
 
-
 # 🖋️ Citation
 
 If you find our work helpful, please **star 🌟** this repo and **cite 📑** our paper. Thanks for your support!
