@@ -9,7 +9,7 @@
 
 <a href='https://follow-your-shape.github.io/'><img src='https://img.shields.io/badge/Project-Page-Green'></a>
 [![arXiv](https://img.shields.io/badge/arXiv-2508.08134-b31b1b.svg)](https://arxiv.org/abs/2508.08134)
-[![Huggingface space](https://img.shields.io/badge/🤗-Huggingface%20Space-orange.svg)](https://github.com/mayuelala/FollowYourShape) 
+[![Huggingface space](https://img.shields.io/badge/🤗-Huggingface%20Space-orange.svg)](https://huggingface.co/papers/2508.08134) 
 [![GitHub Stars](https://img.shields.io/github/stars/mayuelala/FollowYourShape)](https://github.com/mayuelala/FollowYourShape)
 
 <!-- [![PWC](https://img.shields.io/endpoint.svg?url=https://paperswithcode.com/badge/kv-edit-training-free-image-editing-for/text-based-image-editing-on-pie-bench)](https://paperswithcode.com/sota/text-based-image-editing-on-pie-bench?p=kv-edit-training-free-image-editing-for)
@@ -32,6 +32,7 @@ We propose <b>Follow-Your-Shape</b>, a training-free and mask-free framework tha
 <!-- - [2025.3.12] Thanks to @[smthemex](https://github.com/smthemex) for integrating KV-Edit into [ComfyUI](https://github.com/smthemex/ComfyUI_KV_Edit)!
 - [2025.3.4] We update "attention scale" feature to reduce the discontinuity with the background.
 - [2025.2.26] Our paper is featured in [huggingface Papers](https://huggingface.co/papers/2502.17363)! -->
+- [2026.3.30] 🤗 The ReShapeBench Dataset can be found at our huggingface space!
 - [2026.1.25] 🎉 Our paper is accepted to ICLR 2026!
 - [2025.8.11] Code released!
 - [2025.8.11] Paper released!
