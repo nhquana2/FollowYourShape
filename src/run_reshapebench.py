@@ -184,6 +184,10 @@ def edit_one(sample, args, models, torch_device):
         controlnet_scale = None
         guidance_start, guidance_end = 0.0, 0.0
 
+    if torch.cuda.is_available():
+        print(f"  [mem] before denoise: allocated={torch.cuda.memory_allocated()/1e9:.2f} GB, "
+              f"reserved={torch.cuda.memory_reserved()/1e9:.2f} GB")
+
     # inversion -> initial noise
     z, info = denoise(model, **inp, timesteps=timesteps, guidance=1, inverse=True, info=info,
                       inject_list=inject_list, controlnet=controlnet, control_patch=control_patch,
@@ -280,6 +284,11 @@ def main():
 
     models = dict(t5=t5, clip=clip, model=model, ae=ae, controlnet=controlnet,
                   dpt_model=dpt_model, dpt_processor=dpt_processor, nsfw_classifier=nsfw_classifier)
+
+    if torch.cuda.is_available():
+        print(f"[mem] after loading all models: allocated={torch.cuda.memory_allocated()/1e9:.2f} GB, "
+              f"reserved={torch.cuda.memory_reserved()/1e9:.2f} GB, "
+              f"free/total={[x/1e9 for x in torch.cuda.mem_get_info()]} GB")
 
     # ----------------- load dataset -----------------
     print(f"Loading dataset {DATASET_NAME} ...")
