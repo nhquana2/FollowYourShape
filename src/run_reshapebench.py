@@ -190,10 +190,12 @@ def edit_one(sample, args, models, torch_device):
         controlnet_scale = 0.5
         guidance_start, guidance_end = 0.0, 0.4
     elif args.controlnet_type == 'multi':
+        # Paper: depth + Canny branches over normalized denoising interval [0.1, 0.3],
+        # with respective strengths 2.5 and 3.5.
         control_mode = [tensor([0], dtype=torch.long).to(torch_device),
                         tensor([0], dtype=torch.long).to(torch_device)]
-        controlnet_scale = [2.5, 3.35]
-        guidance_start, guidance_end = 0.1, 0.7
+        controlnet_scale = [2.5, 3.5]
+        guidance_start, guidance_end = 0.1, 0.3
     else:
         control_mode = None
         controlnet_scale = None
