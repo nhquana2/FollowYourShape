@@ -136,6 +136,15 @@ def edit_one(sample, args, models, torch_device):
     # NOTE: edit.py assigns width<-H, height<-W (square images, so harmless). Kept identical.
     width, height = init_image.shape[0], init_image.shape[1]
 
+    offload = args.offload
+
+    # Phase 1 (preprocessing): only the VAE encoder (+ DPT below) needs the GPU;
+    # keep FLUX on CPU so there is room for control-image encoding.
+    if offload:
+        model.cpu()
+        torch.cuda.empty_cache()
+        ae.encoder.to(torch_device)
+
     # Keep the DPT depth model on the GPU only while building the control image,
     # then evict it before the heavy denoise. edit.py frees DPT the same way (it
     # builds it in a local scope), so it is not resident during denoising. Leaving
@@ -162,6 +171,12 @@ def edit_one(sample, args, models, torch_device):
     info['feature'] = {}
     info['inject_step'] = args.inject
 
+    # Phase 2 (text encoding): swap the VAE out for the text encoders.
+    if offload:
+        ae = ae.cpu()
+        torch.cuda.empty_cache()
+        t5, clip = t5.to(torch_device), clip.to(torch_device)
+
     inp = prepare(t5, clip, init_image, prompt=sample['source_prompt'])
     inp_target = prepare(t5, clip, init_image, prompt=sample['target_prompt'])
     timesteps = get_schedule(args.num_steps, inp["img"].shape[1], shift=(name != "flux-schnell"))
@@ -184,6 +199,12 @@ def edit_one(sample, args, models, torch_device):
         controlnet_scale = None
         guidance_start, guidance_end = 0.0, 0.0
 
+    # Phase 3 (denoise): swap the text encoders out for FLUX.
+    if offload:
+        t5, clip = t5.cpu(), clip.cpu()
+        torch.cuda.empty_cache()
+        model = model.to(torch_device)
+
     if torch.cuda.is_available():
         print(f"  [mem] before denoise: allocated={torch.cuda.memory_allocated()/1e9:.2f} GB, "
               f"reserved={torch.cuda.memory_reserved()/1e9:.2f} GB")
@@ -204,6 +225,12 @@ def edit_one(sample, args, models, torch_device):
                             controlnet=controlnet, control_patch=control_patch,
                             controlnet_scale=controlnet_scale, controlnet_mode=control_mode,
                             guidance_start=guidance_start, guidance_end=guidance_end)
+
+    # Phase 4 (decode): swap FLUX out for the VAE decoder.
+    if offload:
+        model.cpu()
+        torch.cuda.empty_cache()
+        ae.decoder.to(x.device)
 
     # decode latent -> pixels
     batch_x = unpack(x.float(), width, height)
@@ -262,10 +289,12 @@ def main():
     nsfw_classifier = pipeline("image-classification", model="Falconsai/nsfw_image_detection", device=device)
 
     if args.offload:
-        # offload keeps weights on CPU and is incompatible with the single-pass
-        # batch flow below, which expects all modules resident. Warn loudly.
-        print("WARNING: --offload moves modules to CPU but this batch script keeps them "
-              "resident for speed. On <40GB GPUs prefer running fewer cases per process.")
+        # Sequential offload (mirrors edit.py): FLUX starts on CPU, only the VAE
+        # encoder sits on the GPU. edit_one then juggles T5/CLIP <-> FLUX per phase
+        # so only one large module is resident at a time (~30GB peak instead of the
+        # ~41GB fully-resident footprint that OOMs a 40GB GPU on the multi config).
+        model.cpu()
+        torch.cuda.empty_cache()
         ae.encoder.to(torch_device)
 
     controlnet = None
