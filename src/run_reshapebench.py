@@ -136,8 +136,20 @@ def edit_one(sample, args, models, torch_device):
     # NOTE: edit.py assigns width<-H, height<-W (square images, so harmless). Kept identical.
     width, height = init_image.shape[0], init_image.shape[1]
 
+    # Keep the DPT depth model on the GPU only while building the control image,
+    # then evict it before the heavy denoise. edit.py frees DPT the same way (it
+    # builds it in a local scope), so it is not resident during denoising. Leaving
+    # it resident is the ~0.5GB the batch script otherwise carries over edit.py,
+    # which is enough to OOM a 40GB GPU on the full depth+canny config.
+    if dpt_model is not None:
+        dpt_model.to(torch_device)
+
     control_patch = build_control_patch(raw_pil_image, new_w, new_h, args, ae,
                                          controlnet, dpt_model, dpt_processor, torch_device)
+
+    if dpt_model is not None:
+        dpt_model.cpu()
+        torch.cuda.empty_cache()
 
     init_image = encode(init_image, torch_device, ae)
 
