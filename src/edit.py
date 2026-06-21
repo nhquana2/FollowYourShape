@@ -270,7 +270,7 @@ def main(
             guidance_start = 0.0
             guidance_end = 0.4
         elif args.controlnet_type == 'multi':
-            control_mode = [tensor([0], dtype=torch.long).to(torch_device),  tensor([0], dtype=torch.long).to(torch_device)]
+            control_mode = [tensor([2], dtype=torch.long).to(torch_device),  tensor([0], dtype=torch.long).to(torch_device)]
             controlnet_scale = [2.5, 3.35]
             guidance_start = 0.1
             guidance_end = 0.7
