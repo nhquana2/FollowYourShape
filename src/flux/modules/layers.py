@@ -1,5 +1,6 @@
 import math
 from dataclasses import dataclass
+from typing import Callable
 
 import torch
 from einops import rearrange
@@ -156,7 +157,10 @@ class DoubleStreamBlock(nn.Module):
             nn.Linear(mlp_hidden_dim, hidden_size, bias=True),
         )
 
-    def forward(self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor, info) -> tuple[Tensor, Tensor]:
+    def forward(
+        self, img: Tensor, txt: Tensor, vec: Tensor, pe: Tensor, info,
+        attn_capture: Callable[[Tensor], None] | None = None,
+    ) -> tuple[Tensor, Tensor]:
         img_mod1, img_mod2 = self.img_mod(vec)
         txt_mod1, txt_mod2 = self.txt_mod(vec)
 
@@ -183,6 +187,9 @@ class DoubleStreamBlock(nn.Module):
         attn = attention(q, k, v, pe=pe)
  
         txt_attn, img_attn = attn[:, : txt.shape[1]], attn[:, txt.shape[1] :]
+
+        if attn_capture is not None:
+            attn_capture(img_attn)
 
         # calculate the img bloks
         img = img + img_mod1.gate * self.img_attn.proj(img_attn)

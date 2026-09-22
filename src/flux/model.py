@@ -1,4 +1,6 @@
 from dataclasses import dataclass
+from functools import partial
+from typing import Callable
 
 import torch
 from torch import Tensor, nn
@@ -86,6 +88,7 @@ class Flux(nn.Module):
         info = None,
         controlnet_block_samples: list[Tensor] | None = None,
         controlnet_single_block_samples: list[Tensor] | None = None,
+        attn_capture: Callable[[int, Tensor], None] | None = None,
     ) -> Tensor:
         if img.ndim != 3 or txt.ndim != 3:
             raise ValueError("Input img and txt tensors must have 3 dimensions.")
@@ -106,7 +109,8 @@ class Flux(nn.Module):
         inject_start_layer = 15
 
         for i, block in enumerate(self.double_blocks):
-            img, txt = block(img=img, txt=txt, vec=vec, pe=pe, info=info)
+            capture = partial(attn_capture, i) if attn_capture is not None else None
+            img, txt = block(img=img, txt=txt, vec=vec, pe=pe, info=info, attn_capture=capture)
 
             # Controlnet residual
             if controlnet_block_samples is not None and i >= inject_start_layer:

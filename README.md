@@ -148,6 +148,82 @@ python edit.py  --source_prompt [your source image prompt] \
 
 Please refer to the paper for the rationale and recommended values of the hyperparameters.
 
+## Optional attention-output TDM
+
+Add `--tdm_attention` to an existing editing command to use attention-output
+divergence instead of the original velocity TDM. Without this flag, the original
+velocity path is used. No training, gradient optimization, or additional concept
+tokens are involved.
+
+From the repository root, for example:
+
+```bash
+python src/edit.py \
+    --source_img_dir src/examples/source/parrot.png \
+    --source_prompt "A vibrant macaw perched on a tree branch in a tropical jungle." \
+    --target_prompt "A brown hat resting on a tree branch in a tropical jungle." \
+    --name flux-dev --num_steps 15 --guidance 2 --front 2 --inject 3 \
+    --controlnet_type none --offload \
+    --tdm_attention --tdm_attn_layers 13,14,15,16,17,18 \
+    --output_dir outputs/parrot_attention \
+    --vis_path outputs/parrot_attention/maps
+```
+
+`--tdm_attn_layers` selects **zero-based double-stream block indices** (default:
+13 through 18). FLUX.1-dev has 19 double-stream blocks, indexed 0 through 18.
+The collector reads image-token attention outputs after attention heads are
+concatenated, before the output projection, gate, and residual addition. It does
+not extract attention-weight matrices or modify the captured activations.
+
+For interval `k`, the attention variant computes:
+
+```text
+delta[k, patch] = mean_over_selected_blocks(
+    L2_channels(source_midpoint_attention - target_midpoint_attention)
+)
+```
+
+The source comes from the inversion midpoint evaluation. The target comes from
+the existing uninjected target-probe midpoint evaluation. The intervals are
+paired in reverse order, with an explicit midpoint-time check. These are different
+latent trajectories at matching times, not same-latent prompt contrast. Original
+FYS instead compares averages of start and midpoint velocities. Inversion guidance
+(1), target guidance, solver updates, probe passes, ControlNet behavior, and KV
+injection are retained. Start comparisons with ControlNet disabled to avoid its
+additional influence on the inversion features.
+
+The attention maps use the original accumulation window, temporal softmax
+weighting (scale 5), Gaussian smoothing (sigma 0.7), and Otsu thresholding. A
+constant attention-divergence map is safely normalized to zeros.
+
+Visualizations are saved to `--vis_path`. In attention mode, omitting that option
+automatically saves them under `<output_dir>/tdm_visualization`:
+
+- `delta/delta_map_<step>.png`: one normalized divergence map per denoising step.
+- `edit_map.png`: final binary edit-map plot, as in the original implementation.
+- `soft_edit_map.png`: temporally aggregated, smoothed map before thresholding.
+- `edit_map.npy`: the binary patch-grid mask, with 1 indicating editable patches.
+- `tdm_config.json`: selected blocks, midpoint times, and accumulation settings.
+
+The same final edit indices drive the original KV-injection code. Use a separate
+output/visualization directory for each experiment; map filenames are reused on
+reruns. Source attention is cached on CPU in its native dtype and released block
+by block during comparison; distances are computed in FP32. With 1024x1024 input,
+15 steps, six blocks, and 16-bit features, the extra source cache is about 2.1 GiB
+of CPU RAM. Every midpoint is collected to provide the per-step visualizations;
+only the original accumulation window contributes to the final mask.
+
+For a baseline comparison, run the same command without `--tdm_attention`, using
+different output and visualization directories. No extra velocity mode is added.
+
+CPU-only implementation checks (no model weights required), in a project
+environment with the dependencies installed:
+
+```bash
+python -m pip install pytest
+python -m pytest tests/test_attention_tdm.py
+```
+
 
 # 🖋️ Citation
 

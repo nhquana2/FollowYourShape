@@ -1,4 +1,5 @@
 import math
+import json
 from typing import Callable
 
 import torch
@@ -249,6 +250,13 @@ def denoise(
             total_steps=len(timesteps)
         )
 
+        attention_tdm = info.get('attention_tdm') if info is not None else None
+        source_step = len(timesteps) - i - 2
+        capture = None
+        if inverse and attention_tdm is not None:
+            capture = attention_tdm.source_collector(source_step, (t_curr + t_prev) / 2)
+        capture_kwargs = {'attn_capture': capture} if capture is not None else {}
+
         pred_mid, info = model(
             img=img_mid,
             img_ids=img_ids,
@@ -259,8 +267,12 @@ def denoise(
             guidance=guidance_vec,
             info=info,
             controlnet_block_samples=controlnet_block_samples_mid,
-            controlnet_single_block_samples=controlnet_single_block_samples_mid
+            controlnet_single_block_samples=controlnet_single_block_samples_mid,
+            **capture_kwargs,
         )
+
+        if inverse and attention_tdm is not None:
+            attention_tdm.validate_source(source_step)
 
         first_order = (pred_mid - pred) / ((t_prev - t_curr) / 2)
         img = img + (t_prev - t_curr) * pred + 0.5 * (t_prev - t_curr) ** 2 * first_order
@@ -310,6 +322,24 @@ def denoise_with_TDM(
 
     print(f"Cutting at {cut} step")
 
+    attention_tdm = info.get('attention_tdm') if info is not None else None
+    if attention_tdm is not None:
+        if not 0 <= front_pad <= cut < len(timesteps) - 1:
+            raise ValueError("Attention TDM requires a nonempty accumulation window; reduce --front or --inject")
+        vis_dir = info.get('vis_path')
+        if vis_dir:
+            os.makedirs(vis_dir, exist_ok=True)
+            with open(os.path.join(vis_dir, 'tdm_config.json'), 'w', encoding='utf-8') as stream:
+                json.dump({
+                    'signal': 'attention',
+                    'evaluation': 'midpoint',
+                    'block_indices_zero_based': list(attention_tdm.layers),
+                    'aggregation_steps_zero_based': list(range(front_pad, cut + 1)),
+                    'source_midpoints': attention_tdm.midpoints,
+                    'target_guidance': guidance,
+                    'postprocessing': {'temporal_softmax_scale': 5, 'gaussian_sigma': 0.7, 'threshold': 'otsu'},
+                }, stream, indent=2)
+
     if info is not None:
         info['map'] = {}
         info['edit_map'] = None
@@ -335,6 +365,8 @@ def denoise_with_TDM(
         )
         img_mid_test = img + (t_prev - t_curr) / 2 * pred_tar
         t_vec_mid = torch.full((img.shape[0],), (t_curr + (t_prev - t_curr) / 2), dtype=img.dtype, device=img.device)
+        capture = attention_tdm.target_collector(i, (t_curr + t_prev) / 2) if attention_tdm is not None else None
+        capture_kwargs = {'attn_capture': capture} if capture is not None else {}
         pred_mid_test, _ = model(
             img=img_mid_test,
             img_ids=img_ids,
@@ -343,31 +375,37 @@ def denoise_with_TDM(
             y=vec,
             timesteps=t_vec_mid,
             guidance=guidance_vec,
-            info=None
+            info=None,
+            **capture_kwargs,
         )
         first_order = (pred_mid_test - pred_tar) / ((t_prev - t_curr) / 2)
         pred_tar = (pred_mid_test + pred_tar) / 2
 
 
-        delta = (pred_src - pred_tar).pow(2).sum(dim=-1).sqrt()
-
-        
-        delta_min = delta.min()
-        delta_max = delta.max()
-        delta_norm = (delta - delta_min) / (delta_max - delta_min)
-        H_patch = math.ceil(height / 16)
-        W_patch = math.ceil(width / 16)
-        delta_map = delta_norm[0].reshape(W_patch, H_patch)
-
-        if info is not None and i >= front_pad and i <= cut:
-            info['map'][f"{i}_delta_map"] = delta_map
-
+        if attention_tdm is None:
+            delta = (pred_src - pred_tar).pow(2).sum(dim=-1).sqrt()
+        else:
+            delta = capture.result() if capture is not None else None
 
         vis_dir = info.get("vis_path", None)
-        if vis_dir:
-            delta_dir = os.path.join(vis_dir, "delta")
-            os.makedirs(delta_dir, exist_ok=True)
-            plt.imsave(os.path.join(delta_dir, f"delta_map_{i}.png"), delta_map.to(torch.float32).cpu().numpy(), cmap="viridis")
+        if delta is not None:
+            delta_min = delta.min()
+            delta_max = delta.max()
+            denominator = delta_max - delta_min
+            if attention_tdm is not None:
+                denominator = denominator.clamp_min(1e-8)
+            delta_norm = (delta - delta_min) / denominator
+            H_patch = math.ceil(height / 16)
+            W_patch = math.ceil(width / 16)
+            delta_map = delta_norm[0].reshape(W_patch, H_patch)
+
+            if info is not None and i >= front_pad and i <= cut:
+                info['map'][f"{i}_delta_map"] = delta_map
+
+            if vis_dir:
+                delta_dir = os.path.join(vis_dir, "delta")
+                os.makedirs(delta_dir, exist_ok=True)
+                plt.imsave(os.path.join(delta_dir, f"delta_map_{i}.png"), delta_map.to(torch.float32).cpu().numpy(), cmap="viridis")
 
 
 
@@ -415,6 +453,9 @@ def denoise_with_TDM(
                 plt.title("Edit Map")
                 plt.savefig(os.path.join(vis_dir, "edit_map.png"))
                 plt.close()
+                if attention_tdm is not None:
+                    plt.imsave(os.path.join(vis_dir, "soft_edit_map.png"), smoothed_np, cmap='viridis')
+                    np.save(os.path.join(vis_dir, "edit_map.npy"), smoothed_binary_np)
                 print("Saved edit map visualization to edit_map.png")
 
 
