@@ -192,9 +192,11 @@ FYS instead compares averages of start and midpoint velocities. Inversion guidan
 injection are retained. Start comparisons with ControlNet disabled to avoid its
 additional influence on the inversion features.
 
-The attention maps use the original accumulation window, temporal softmax
-weighting (scale 5), Gaussian smoothing (sigma 0.7), and Otsu thresholding. A
-constant attention-divergence map is safely normalized to zeros.
+The attention maps use the original accumulation window, Gaussian smoothing
+(sigma 0.7), and Otsu thresholding. Temporal weights use `softmax(delta_stack)`
+without a scaling multiplier (equivalent to scale 1); velocity TDM retains
+`softmax(5 * delta_stack)`. A constant attention-divergence map is safely
+normalized to zeros.
 
 Visualizations are saved to `--vis_path`. In attention mode, omitting that option
 automatically saves them under `<output_dir>/tdm_visualization`:

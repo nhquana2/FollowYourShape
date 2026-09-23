@@ -337,7 +337,7 @@ def denoise_with_TDM(
                     'aggregation_steps_zero_based': list(range(front_pad, cut + 1)),
                     'source_midpoints': attention_tdm.midpoints,
                     'target_guidance': guidance,
-                    'postprocessing': {'temporal_softmax_scale': 5, 'gaussian_sigma': 0.7, 'threshold': 'otsu'},
+                    'postprocessing': {'temporal_softmax_scale': 1, 'gaussian_sigma': 0.7, 'threshold': 'otsu'},
                 }, stream, indent=2)
 
     if info is not None:
@@ -413,8 +413,9 @@ def denoise_with_TDM(
             delta_stack = torch.stack([v for k, v in info['map'].items() if k.endswith("_delta_map")], dim=0)  # [N, H_patch, W_patch]
             # np.save("delta_stack.npy", delta_stack.cpu().to(torch.float32).numpy())
             
-            scale = 5
-            softmax_weights = F.softmax(delta_stack * scale, dim=0)  # [N, H, W]
+            # Attention uses unscaled logits; retain the original velocity scale.
+            softmax_input = delta_stack if attention_tdm is not None else delta_stack * 5
+            softmax_weights = F.softmax(softmax_input, dim=0)  # [N, H, W]
             soft_mask = (delta_stack * softmax_weights).sum(dim=0)  # [H, W]
             soft_np = soft_mask.to(torch.float32).cpu().numpy()  # [H_patch, W_patch]
             smoothed_np = gaussian_filter(soft_np, sigma=0.7)
