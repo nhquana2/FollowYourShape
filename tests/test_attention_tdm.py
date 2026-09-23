@@ -9,7 +9,7 @@ import torch
 
 from flux.model import Flux, FluxParams
 from flux.sampling import build_inject_list, denoise, denoise_with_TDM
-from flux.tdm import MidpointAttentionTDM, parse_attn_layers
+from flux.tdm import MidpointAttentionTDM, PerStepAttentionMask, parse_attn_layers
 
 
 def test_layer_selection_validation():
@@ -101,9 +101,11 @@ def test_collection_reads_preprojection_image_output_without_changing_prediction
 class TinyProbeModel:
     """Deterministic stand-in exercising the real solver and visualization path."""
 
-    def __init__(self, constant_attention=False):
+    def __init__(self, constant_attention=False, vary_attention=False):
         self.calls = []
         self.constant_attention = constant_attention
+        self.vary_attention = vary_attention
+        self.kv_cache = set()
 
     def __call__(self, *, img, timesteps, txt, info=None, attn_capture=None, **kwargs):
         self.calls.append({
@@ -111,7 +113,16 @@ class TinyProbeModel:
             "inverse": info is not None and info["inverse"],
             "controlled": info is not None,
             "has_edit_map": info is not None and info.get("edit_map") is not None,
+            "inject": info is not None and info["inject"],
+            "second_order": info["second_order"] if info is not None else None,
+            "edit_indices": info["edit_map"].tolist() if info is not None and info.get("edit_map") is not None else None,
         })
+        if info is not None and info.get("dynamic_tdm") is not None and info["inject"]:
+            key = (info["t"], info["second_order"])
+            if info["inverse"]:
+                self.kv_cache.add(key)
+            else:
+                self.kv_cache.remove(key)  # Fails if the required inversion evaluation was not cached.
         positions = torch.arange(1, img.shape[1] + 1, dtype=img.dtype).view(1, -1, 1)
         condition = txt.mean()
         velocity = 0.1 * img + 0.02 * timesteps[:, None, None] + 0.01 * condition * positions
@@ -120,27 +131,33 @@ class TinyProbeModel:
                 features = torch.zeros(img.shape[0], img.shape[1], 2)
             else:
                 features = torch.cat((condition * positions, condition * positions.square()), dim=-1)
+                if self.vary_attention and timesteps[0] < 0.6:
+                    features = features.flip(1)
             for layer in range(3):
                 attn_capture(layer, features * (layer + 1))
         return velocity, info
 
 
-def run_tiny_edit(vis_path, attention=True, constant_attention=False, captured_steps=None):
+def run_tiny_edit(vis_path, attention=True, constant_attention=False, captured_steps=None,
+                  dynamic=False, front=0, schedule=None):
     # A nonuniform schedule catches incorrectly paired inversion intervals.
-    schedule = [1.0, 0.8, 0.55, 0.3, 0.1, 0.0]
+    if schedule is None:
+        schedule = [1.0, 0.8, 0.55, 0.3, 0.1, 0.0]
     num_steps = len(schedule) - 1
-    inject_list = build_inject_list(len(schedule), inject_step=1, front_pad=0, tail_pad=1)
+    inject_list = build_inject_list(len(schedule), inject_step=1, front_pad=front, tail_pad=1)
     info = {"inject_step": 1, "feature": {}}
     if vis_path is not None:
         info["vis_path"] = str(vis_path)
     if attention:
         steps = range(num_steps) if captured_steps is None else captured_steps
         info["attention_tdm"] = MidpointAttentionTDM([0, 2], steps, num_blocks=3)
+    if dynamic:
+        info["dynamic_tdm"] = PerStepAttentionMask(num_steps, front, num_steps - 4, tail=1)
     inputs = dict(
         img=torch.zeros(1, 6, 4), img_ids=torch.zeros(1, 6, 3),
         txt=torch.ones(1, 4, 8), txt_ids=torch.zeros(1, 4, 3), vec=torch.ones(1, 4),
     )
-    model = TinyProbeModel(constant_attention)
+    model = TinyProbeModel(constant_attention, vary_attention=dynamic)
     noise, info = denoise(model, **inputs, timesteps=schedule, inverse=True, info=info,
                           inject_list=inject_list, guidance=1)
     inputs["img"] = noise
@@ -148,7 +165,7 @@ def run_tiny_edit(vis_path, attention=True, constant_attention=False, captured_s
     # Retain edit.py's existing height-first width/height argument convention.
     result, info = denoise_with_TDM(
         model, **inputs, timesteps=schedule, inverse=False, info=info,
-        inject_list=inject_list, guidance=2, width=32, height=48, front_pad=0, tail_pad=1,
+        inject_list=inject_list, guidance=2, width=32, height=48, front_pad=front, tail_pad=1,
     )
     return result, info, model, schedule
 

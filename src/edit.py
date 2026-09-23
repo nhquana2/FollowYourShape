@@ -10,7 +10,7 @@ from fire import Fire
 from PIL import ExifTags, Image
 
 from flux.sampling import denoise, get_schedule, prepare, unpack, denoise_with_TDM, build_inject_list
-from flux.tdm import MidpointAttentionTDM, parse_attn_layers
+from flux.tdm import MidpointAttentionTDM, PerStepAttentionMask, parse_attn_layers
 from flux.util import (configs, embed_watermark, load_ae, load_clip,
                        load_flow_model, load_t5)
 from transformers import pipeline, DPTForDepthEstimation, DPTImageProcessor
@@ -268,6 +268,10 @@ def main(
             cut = len(inject_list) - info['inject_step'] - 2 - 1
             if not 0 <= args.front <= cut < len(timesteps) - 1:
                 raise ValueError("Attention TDM requires a nonempty accumulation window; reduce --front or --inject")
+            if args.tdm_dynamic:
+                info['dynamic_tdm'] = PerStepAttentionMask(
+                    len(timesteps) - 1, args.front, cut, tail=1,
+                )
             # Visualizations include every interval, matching the original delta
             # output. Only the original accumulation window determines the mask.
             capture_steps = range(len(timesteps) - 1) if info.get('vis_path') else range(args.front, cut + 1)
@@ -275,6 +279,8 @@ def main(
                 args.tdm_attn_layers, capture_steps, num_blocks=len(model.double_blocks),
             )
             print(f"Attention TDM: midpoint outputs, zero-based blocks {args.tdm_attn_layers}")
+            if args.tdm_dynamic:
+                print(f"Dynamic masks: update steps {list(info['dynamic_tdm'].update_steps)}, then freeze")
             print(f"TDM visualizations: {info['vis_path']}")
 
 
@@ -409,8 +415,12 @@ if __name__ == "__main__":
                         help='use midpoint attention-output divergence instead of the original velocity TDM')
     parser.add_argument('--tdm_attn_layers', type=parse_attn_layers, default='13,14,15,16,17,18',
                         help='comma-separated zero-based double-stream blocks for attention TDM')
+    parser.add_argument('--tdm_dynamic', action='store_true',
+                        help='apply each attention mask immediately, then freeze the latest mask for later injection')
 
 
     args = parser.parse_args()
+    if args.tdm_dynamic and not args.tdm_attention:
+        parser.error('--tdm_dynamic requires --tdm_attention')
 
     main(args)

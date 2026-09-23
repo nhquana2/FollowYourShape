@@ -168,6 +168,10 @@ def denoise(
     guidance_end: float = 1.0
 ):
 
+    dynamic_tdm = info.get('dynamic_tdm') if info is not None else None
+    if dynamic_tdm is not None:
+        dynamic_tdm.validate(info.get('attention_tdm'), len(timesteps) - 1)
+
     if inverse:
         timesteps = timesteps[::-1]
         inject_list = inject_list[::-1]
@@ -189,6 +193,10 @@ def denoise(
         info['inverse'] = inverse
         info['second_order'] = False
         info['inject'] = inject_list[i]
+        if inverse and dynamic_tdm is not None:
+            # Inversion visits denoising intervals in reverse. Record source KV
+            # for every new middle-stage injection, at both solver evaluations.
+            info['inject'] = dynamic_tdm.injects(len(timesteps) - i - 2)
 
         controlnet_block_samples, controlnet_single_block_samples = get_controlnet_output(
             controlnet=controlnet,
@@ -323,6 +331,15 @@ def denoise_with_TDM(
     print(f"Cutting at {cut} step")
 
     attention_tdm = info.get('attention_tdm') if info is not None else None
+    dynamic_tdm = info.get('dynamic_tdm') if info is not None else None
+    if dynamic_tdm is not None:
+        dynamic_tdm.validate(attention_tdm, len(timesteps) - 1)
+        if (
+            inverse or dynamic_tdm.front != front_pad or dynamic_tdm.freeze_step != cut
+            or dynamic_tdm.inject_end != len(timesteps) - 1 - tail_pad
+        ):
+            raise ValueError("Dynamic mask boundaries must match the denoising TDM window and tail")
+        print(f"Dynamic K/V injection steps: {list(range(dynamic_tdm.inject_end))}")
     if attention_tdm is not None:
         if not 0 <= front_pad <= cut < len(timesteps) - 1:
             raise ValueError("Attention TDM requires a nonempty accumulation window; reduce --front or --inject")
@@ -333,11 +350,17 @@ def denoise_with_TDM(
                 json.dump({
                     'signal': 'attention',
                     'evaluation': 'midpoint',
+                    'mask_mode': 'per_step' if dynamic_tdm is not None else 'aggregate',
                     'block_indices_zero_based': list(attention_tdm.layers),
-                    'aggregation_steps_zero_based': list(range(front_pad, cut + 1)),
+                    'aggregation_steps_zero_based': [] if dynamic_tdm is not None else list(range(front_pad, cut + 1)),
+                    'mask_update_steps_zero_based': list(dynamic_tdm.update_steps) if dynamic_tdm is not None else [cut],
+                    'freeze_step_zero_based': cut,
+                    'injection_steps_zero_based': [i for i in range(len(timesteps) - 1)
+                                                  if (dynamic_tdm.injects(i) if dynamic_tdm is not None else inject_list[i])],
                     'source_midpoints': attention_tdm.midpoints,
                     'target_guidance': guidance,
-                    'postprocessing': {'temporal_softmax_scale': 1, 'gaussian_sigma': 0.7, 'threshold': 'otsu'},
+                    'postprocessing': {'temporal_softmax_scale': None if dynamic_tdm is not None else 1,
+                                       'gaussian_sigma': 0.7, 'threshold': 'otsu'},
                 }, stream, indent=2)
 
     if info is not None:
@@ -388,6 +411,7 @@ def denoise_with_TDM(
             delta = capture.result() if capture is not None else None
 
         vis_dir = info.get("vis_path", None)
+        delta_map = None
         if delta is not None:
             delta_min = delta.min()
             delta_max = delta.max()
@@ -399,7 +423,7 @@ def denoise_with_TDM(
             W_patch = math.ceil(width / 16)
             delta_map = delta_norm[0].reshape(W_patch, H_patch)
 
-            if info is not None and i >= front_pad and i <= cut:
+            if dynamic_tdm is None and info is not None and i >= front_pad and i <= cut:
                 info['map'][f"{i}_delta_map"] = delta_map
 
             if vis_dir:
@@ -409,7 +433,15 @@ def denoise_with_TDM(
 
 
 
-        if i == cut:
+        if dynamic_tdm is not None:
+            edit_indices = dynamic_tdm.process(
+                i, delta_map, delta, (math.ceil(width / 16), math.ceil(height / 16)),
+                initial_edit_indices=info.get('mask'), vis_dir=vis_dir,
+            )
+            if edit_indices is not None:
+                info['edit_map'] = edit_indices
+
+        if dynamic_tdm is None and i == cut:
             delta_stack = torch.stack([v for k, v in info['map'].items() if k.endswith("_delta_map")], dim=0)  # [N, H_patch, W_patch]
             # np.save("delta_stack.npy", delta_stack.cpu().to(torch.float32).numpy())
             
@@ -467,6 +499,8 @@ def denoise_with_TDM(
         info['inverse'] = inverse
         info['second_order'] = False
         info['inject'] = inject_list[i]
+        if dynamic_tdm is not None:
+            info['inject'] = dynamic_tdm.injects(i)
 
 
         controlnet_block_samples, controlnet_single_block_samples = get_controlnet_output(

@@ -262,30 +262,27 @@ class SingleStreamBlock(nn.Module):
             feature_name_v = str(info['t']) + '_' + str(info['second_order']) + '_' + str(info['id']) + '_' + info['type'] + '_' + 'V'
 
             if info['inverse']:
-                info['feature'][feature_name_k] = img_k.cpu()
-                info['feature'][feature_name_v] = img_v.cpu()
-                
-            elif info['edit_map'] is not None:
-                source_img_k = info['feature'][feature_name_k].to(x.device)
-                source_img_v = info['feature'][feature_name_v].to(x.device)
-
-                edit_indices = info['edit_map']
-
-                source_img_k[:, :, edit_indices, ...] = img_k[:, :, edit_indices, ...]
-                source_img_v[:, :, edit_indices, ...] = img_v[:, :, edit_indices, ...]
-
-                k = torch.cat((txt_k, source_img_k), dim=2)
-                v = torch.cat((txt_v, source_img_v), dim=2)
-
+                if info.get('dynamic_tdm') is not None:
+                    info['feature'][feature_name_k] = img_k.detach().to(device='cpu', copy=True)
+                    info['feature'][feature_name_v] = img_v.detach().to(device='cpu', copy=True)
+                else:
+                    info['feature'][feature_name_k] = img_k.cpu()
+                    info['feature'][feature_name_v] = img_v.cpu()
             else:
-                source_img_k = info['feature'][feature_name_k].to(x.device)
-                source_img_v = info['feature'][feature_name_v].to(x.device)
+                dynamic = info.get('dynamic_tdm') is not None
+                # Dynamic masks can change at every interval. Never overwrite
+                # cached source tensors when running on the same device (CPU).
+                source_img_k = info['feature'][feature_name_k].to(x.device, copy=dynamic)
+                source_img_v = info['feature'][feature_name_v].to(x.device, copy=dynamic)
+                if dynamic:
+                    # Each block/evaluation is consumed once. Release the extra
+                    # middle-stage cache as soon as its solver step uses it.
+                    del info['feature'][feature_name_k], info['feature'][feature_name_v]
 
-                mask_indices = info['mask'] if 'mask' in info else None
-
-                if mask_indices is not None:
-                    source_img_k[:, :, mask_indices, ...] = img_k[:, :, mask_indices, ...]
-                    source_img_v[:, :, mask_indices, ...] = img_v[:, :, mask_indices, ...]
+                edit_indices = info['edit_map'] if info['edit_map'] is not None else info.get('mask')
+                if edit_indices is not None:
+                    source_img_k[:, :, edit_indices, ...] = img_k[:, :, edit_indices, ...]
+                    source_img_v[:, :, edit_indices, ...] = img_v[:, :, edit_indices, ...]
 
                 k = torch.cat((txt_k, source_img_k), dim=2)
                 v = torch.cat((txt_v, source_img_v), dim=2)

@@ -1,6 +1,8 @@
-"""Read-only midpoint attention collection for the optional attention TDM."""
+"""Midpoint attention collection and optional per-step mask control."""
 
+import json
 import math
+from pathlib import Path
 from typing import Callable, Iterable
 
 import torch
@@ -99,3 +101,103 @@ class MidpointAttentionTDM:
         # The collector consumes each layer as it is compared, releasing its CPU
         # storage instead of keeping all inversion features through denoising.
         return AttentionDifference(self.source.pop(step))
+
+
+class PerStepAttentionMask:
+    """Update a mask before each controlled solver step, then freeze it.
+
+    All indices refer to the forward denoising schedule. The original front
+    stabilization and uninjected tail are retained; middle steps now inject KV.
+    """
+
+    def __init__(self, num_steps: int, front: int, cut: int, tail: int = 1):
+        self.num_steps = num_steps
+        self.front = front
+        self.freeze_step = cut
+        self.inject_end = num_steps - tail
+        if not 0 <= front <= cut < self.inject_end <= num_steps:
+            raise ValueError("Dynamic attention TDM requires a nonempty mask window before the uninjected tail")
+        self.update_steps = range(front, self.freeze_step + 1)
+        self.mask = None
+        self.mask_step = None
+        self.previous_applied = None
+        self.diagnostics = []
+
+    def injects(self, step: int) -> bool:
+        return 0 <= step < self.inject_end
+
+    def validate(self, attention_tdm: MidpointAttentionTDM | None, num_steps: int) -> None:
+        if attention_tdm is None:
+            raise ValueError("Dynamic masks require attention TDM")
+        if num_steps != self.num_steps:
+            raise ValueError("Dynamic mask schedule does not match the sampler")
+        if not set(self.update_steps).issubset(attention_tdm.steps):
+            raise ValueError("Attention capture must cover every dynamic mask update step")
+
+    def process(self, step: int, delta_map: Tensor | None, raw_delta: Tensor | None,
+                grid_shape: tuple[int, int], initial_edit_indices: Tensor | None = None,
+                vis_dir: str | None = None) -> Tensor | None:
+        """Return new edit indices only when updating; record the applied mask."""
+        import numpy as np
+        from scipy.ndimage import gaussian_filter
+        from skimage.filters import threshold_otsu
+
+        updated = step in self.update_steps
+        edit_indices = None
+        smoothed = None
+        if updated:
+            if delta_map is None:
+                raise RuntimeError(f"Missing attention map for dynamic mask step {step}")
+            smoothed = gaussian_filter(delta_map.detach().float().cpu().numpy(), sigma=0.7)
+            self.mask = (smoothed > threshold_otsu(smoothed)).astype(np.uint8)
+            self.mask_step = step
+            edit_indices = torch.from_numpy(np.flatnonzero(self.mask)).to(delta_map.device)
+
+        if not self.injects(step):
+            # No source injection means all patches retain target KV.
+            applied = np.ones(grid_shape, dtype=np.uint8)
+        elif step < self.front:
+            applied = np.zeros(grid_shape, dtype=np.uint8)
+            if initial_edit_indices is not None:
+                applied.flat[initial_edit_indices.detach().cpu().numpy()] = 1
+        elif self.mask is None:
+            raise RuntimeError("No dynamic mask available before selective injection")
+        else:
+            applied = self.mask.copy()
+
+        stats = None
+        if raw_delta is not None:
+            values = raw_delta.detach().float()
+            stats = {"min": values.min().item(), "max": values.max().item(),
+                     "mean": values.mean().item(), "std": values.std(unbiased=False).item()}
+        changed = None if self.previous_applied is None else int(np.count_nonzero(applied != self.previous_applied))
+        self.diagnostics.append({
+            "step": step, "injection": self.injects(step), "mask_updated": updated,
+            "mask_source_step": self.mask_step,
+            "frozen": self.injects(step) and step > self.freeze_step,
+            "editable_patches": int(applied.sum()), "editable_fraction": float(applied.mean()),
+            "changed_patches": changed, "raw_divergence": stats,
+        })
+        self.previous_applied = applied.copy()
+
+        if vis_dir:
+            import matplotlib.pyplot as plt
+
+            root = Path(vis_dir)
+            mask_dir = root / "masks"
+            mask_dir.mkdir(parents=True, exist_ok=True)
+            plt.imsave(mask_dir / f"edit_map_{step}.png", applied, cmap="viridis", vmin=0, vmax=1)
+            np.save(mask_dir / f"edit_map_{step}.npy", applied)
+            if updated:
+                plt.imsave(mask_dir / f"soft_edit_map_{step}.png", smoothed, cmap="viridis", vmin=0, vmax=1)
+            if step == self.freeze_step:
+                plt.figure()
+                plt.imshow(self.mask, cmap="viridis", vmin=0, vmax=1)
+                plt.colorbar()
+                plt.title("Edit Map")
+                plt.savefig(root / "edit_map.png")
+                plt.close()
+                plt.imsave(root / "soft_edit_map.png", smoothed, cmap="viridis", vmin=0, vmax=1)
+                np.save(root / "edit_map.npy", self.mask)
+            (root / "mask_diagnostics.json").write_text(json.dumps(self.diagnostics, indent=2), encoding="utf-8")
+        return edit_indices

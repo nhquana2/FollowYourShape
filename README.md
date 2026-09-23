@@ -223,8 +223,68 @@ environment with the dependencies installed:
 
 ```bash
 python -m pip install pytest
-python -m pytest tests/test_attention_tdm.py
+python -m pytest tests
 ```
+
+### Per-step masks with immediate K/V injection
+
+Add `--tdm_dynamic` alongside `--tdm_attention` to use each mask immediately:
+
+```bash
+python src/edit.py \
+    --source_img_dir src/examples/source/parrot.png \
+    --source_prompt "A vibrant macaw perched on a tree branch in a tropical jungle." \
+    --target_prompt "A brown hat resting on a tree branch in a tropical jungle." \
+    --name flux-dev --num_steps 15 --guidance 2 --front 2 --inject 4 \
+    --controlnet_type none --offload \
+    --tdm_attention --tdm_dynamic \
+    --output_dir outputs/parrot_dynamic \
+    --vis_path outputs/parrot_dynamic/maps
+```
+
+This mode uses the existing uninjected midpoint probe to compute attention
+divergence. Each map is independently normalized, Gaussian-smoothed (sigma 0.7),
+and Otsu-thresholded, without temporal aggregation or temporal softmax. The new
+mask is applied to both evaluations of the actual solver update in that same
+interval. Editable patches retain target K/V; other patches receive source K/V.
+The selected attention blocks and original single-stream injection blocks are
+unchanged. No extra model passes, training, or prompt parsing are introduced.
+
+Mask updates stop automatically at the original TDM window end:
+`cut = num_steps - inject - 3` (the CLI uses a one-step uninjected tail).
+The latest mask is then frozen, including the gap before the original late
+injection stage. For `num_steps=15`, `front=2`, and `inject=4`:
+
+| Steps (zero-based) | K/V behavior |
+| --- | --- |
+| 0–1 | Original initial source injection (respecting an optional input mask) |
+| 2–8 | Fresh per-step mask, applied immediately |
+| 9–13 | Frozen mask from step 8 |
+| 14 | Original uninjected final step |
+
+There is no freeze-step parameter. Later delta maps remain available for
+inspection but do not update the frozen mask. Omitting `--tdm_dynamic` keeps the
+existing attention-aggregation behavior; omitting both flags keeps velocity TDM.
+
+In addition to the existing delta maps, dynamic mode saves:
+
+- `masks/edit_map_<step>.png` and `.npy`: the mask actually applied at that step,
+  with 1 meaning target K/V and 0 meaning source K/V. The uninjected tail is all 1.
+- `masks/soft_edit_map_<step>.png`: the smoothed map for each mask-update step.
+- `edit_map.png`, `edit_map.npy`, `soft_edit_map.png`: the final frozen mask and
+  its smoothed map, not the all-1 tail mask.
+- `mask_diagnostics.json`: injection/update status, mask source step, editable
+  area, changed patch count versus the previous applied mask, and raw divergence
+  min/max/mean/std at each step.
+- `tdm_config.json`: the actual update, freeze, and injection schedule. Its
+  temporal softmax scale is `null` because no temporal softmax is used.
+
+Dynamic mode also caches source K/V for the middle-stage intervals during
+inversion, at both solver evaluations. This increases peak CPU memory usage;
+features are released as denoising consumes them. At 1024x1024, with 16-bit K/V
+and the settings in the table, the eight additional intervals require about
+13.5 GiB of CPU RAM on top of the existing caches. `--offload` does not remove
+this CPU-memory cost. Use separate output directories when comparing variants.
 
 
 # 🖋️ Citation
