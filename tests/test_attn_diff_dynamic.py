@@ -8,8 +8,8 @@ import pytest
 import torch
 
 import flux.modules.layers as layers
-from flux.tdm import MidpointAttentionTDM, PerStepAttentionMask
-from test_attention_tdm import run_tiny_edit
+from flux.attn_diff import MidpointAttentionDifference, PerStepAttentionMask
+from test_attn_diff import run_tiny_edit
 
 
 @pytest.mark.parametrize("constant_attention", [False, True])
@@ -22,7 +22,7 @@ def test_same_step_injection_freezing_and_saved_applied_masks(tmp_path, constant
     assert torch.isfinite(result).all()
     assert len(model.calls) == num_steps * 6  # No additional model evaluations.
     assert not model.kv_cache  # Every needed source evaluation was cached and consumed.
-    assert not info["attention_tdm"].source
+    assert not info["attn_diff"].source
     assert not info["map"]  # No temporal accumulation in this mode.
 
     controlled = [call for call in model.calls if call["controlled"] and not call["inverse"]]
@@ -61,7 +61,7 @@ def test_same_step_injection_freezing_and_saved_applied_masks(tmp_path, constant
     assert [item["step"] for item in diagnostics if item["frozen"]] == [4, 5]
     assert diagnostics[4]["changed_patches"] == 0
     assert all(item["raw_divergence"] is not None for item in diagnostics)
-    config = json.loads((tmp_path / "tdm_config.json").read_text())
+    config = json.loads((tmp_path / "attn_diff_config.json").read_text())
     assert config["mask_mode"] == "per_step"
     assert config["aggregation_steps_zero_based"] == []
     assert config["mask_update_steps_zero_based"] == [1, 2, 3]
@@ -72,7 +72,7 @@ def test_same_step_injection_freezing_and_saved_applied_masks(tmp_path, constant
 def test_dynamic_window_only_capture_without_visualization():
     _, info, model, _ = run_tiny_edit(None, dynamic=True, captured_steps=[0, 1])
     assert not model.kv_cache
-    assert info["dynamic_tdm"].mask_step == 1
+    assert info["dynamic_mask"].mask_step == 1
     assert sum(call["capture"] for call in model.calls) == 4
 
 
@@ -83,9 +83,9 @@ def test_dynamic_schedule_validation():
         run_tiny_edit(None, dynamic=True, attention=False)
     policy = PerStepAttentionMask(5, front=0, cut=1)
     with pytest.raises(ValueError, match="every dynamic"):
-        policy.validate(MidpointAttentionTDM([0], [1], num_blocks=1), num_steps=5)
+        policy.validate(MidpointAttentionDifference([0], [1], num_blocks=1), num_steps=5)
     with pytest.raises(ValueError, match="schedule"):
-        policy.validate(MidpointAttentionTDM([0], [0, 1], num_blocks=1), num_steps=6)
+        policy.validate(MidpointAttentionDifference([0], [0, 1], num_blocks=1), num_steps=6)
 
 
 @pytest.mark.parametrize("second_order", [False, True])
@@ -107,7 +107,7 @@ def test_real_block_blends_current_mask_and_consumes_immutable_source_cache(monk
     monkeypatch.setattr(layers, "attention", observe)
     info = dict(inverse=True, inject=True, id=20, t=0.8, second_order=second_order,
                 type="single", feature={}, edit_map=None,
-                dynamic_tdm=PerStepAttentionMask(5, front=0, cut=1))
+                dynamic_mask=PerStepAttentionMask(5, front=0, cut=1))
     with torch.no_grad():
         block(source, vec, pe, info)
         source_references = dict(info["feature"])

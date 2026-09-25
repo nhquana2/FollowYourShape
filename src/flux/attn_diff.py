@@ -20,7 +20,7 @@ def parse_attn_layers(value: str) -> tuple[int, ...]:
     return layers
 
 
-class AttentionDifference:
+class StepAttentionDifference:
     """Reduce each selected block immediately, without caching target features."""
 
     def __init__(self, source: dict[int, Tensor]):
@@ -46,7 +46,7 @@ class AttentionDifference:
         return self.total / self.num_layers
 
 
-class MidpointAttentionTDM:
+class MidpointAttentionDifference:
     """Cache source features by denoising interval index, not float timestep keys.
 
     Inversion visits intervals in reverse order. Its midpoint outputs can be
@@ -88,7 +88,7 @@ class MidpointAttentionTDM:
             if missing:
                 raise RuntimeError(f"Missing source attention at interval {step}, blocks {sorted(missing)}")
 
-    def target_collector(self, step: int, midpoint: float) -> AttentionDifference | None:
+    def target_collector(self, step: int, midpoint: float) -> StepAttentionDifference | None:
         if step not in self.steps:
             return None
         if step not in self.source:
@@ -100,7 +100,7 @@ class MidpointAttentionTDM:
         self.validate_source(step)
         # The collector consumes each layer as it is compared, releasing its CPU
         # storage instead of keeping all inversion features through denoising.
-        return AttentionDifference(self.source.pop(step))
+        return StepAttentionDifference(self.source.pop(step))
 
 
 class PerStepAttentionMask:
@@ -116,7 +116,7 @@ class PerStepAttentionMask:
         self.freeze_step = cut
         self.inject_end = num_steps - tail
         if not 0 <= front <= cut < self.inject_end <= num_steps:
-            raise ValueError("Dynamic attention TDM requires a nonempty mask window before the uninjected tail")
+            raise ValueError("Dynamic attention difference requires a nonempty mask window before the uninjected tail")
         self.update_steps = range(front, self.freeze_step + 1)
         self.mask = None
         self.mask_step = None
@@ -126,12 +126,12 @@ class PerStepAttentionMask:
     def injects(self, step: int) -> bool:
         return 0 <= step < self.inject_end
 
-    def validate(self, attention_tdm: MidpointAttentionTDM | None, num_steps: int) -> None:
-        if attention_tdm is None:
-            raise ValueError("Dynamic masks require attention TDM")
+    def validate(self, attn_diff: MidpointAttentionDifference | None, num_steps: int) -> None:
+        if attn_diff is None:
+            raise ValueError("Dynamic masks require attention difference")
         if num_steps != self.num_steps:
             raise ValueError("Dynamic mask schedule does not match the sampler")
-        if not set(self.update_steps).issubset(attention_tdm.steps):
+        if not set(self.update_steps).issubset(attn_diff.steps):
             raise ValueError("Attention capture must cover every dynamic mask update step")
 
     def process(self, step: int, delta_map: Tensor | None, raw_delta: Tensor | None,

@@ -148,9 +148,9 @@ python edit.py  --source_prompt [your source image prompt] \
 
 Please refer to the paper for the rationale and recommended values of the hyperparameters.
 
-## Optional attention-output TDM
+## Optional Attention Difference
 
-Add `--tdm_attention` to an existing editing command to use attention-output
+Add `--attn_diff` to an existing editing command to use attention-output
 divergence instead of the original velocity TDM. Without this flag, the original
 velocity path is used. No training, gradient optimization, or additional concept
 tokens are involved.
@@ -164,12 +164,12 @@ python src/edit.py \
     --target_prompt "A brown hat resting on a tree branch in a tropical jungle." \
     --name flux-dev --num_steps 15 --guidance 2 --front 2 --inject 3 \
     --controlnet_type none --offload \
-    --tdm_attention --tdm_attn_layers 13,14,15,16,17,18 \
+    --attn_diff --attn_diff_layers 13,14,15,16,17,18 \
     --output_dir outputs/parrot_attention \
     --vis_path outputs/parrot_attention/maps
 ```
 
-`--tdm_attn_layers` selects **zero-based double-stream block indices** (default:
+`--attn_diff_layers` selects **zero-based double-stream block indices** (default:
 13 through 18). FLUX.1-dev has 19 double-stream blocks, indexed 0 through 18.
 The collector reads image-token attention outputs after attention heads are
 concatenated, before the output projection, gate, and residual addition. It does
@@ -199,13 +199,13 @@ without a scaling multiplier (equivalent to scale 1); velocity TDM retains
 normalized to zeros.
 
 Visualizations are saved to `--vis_path`. In attention mode, omitting that option
-automatically saves them under `<output_dir>/tdm_visualization`:
+automatically saves them under `<output_dir>/attn_diff_visualization`:
 
 - `delta/delta_map_<step>.png`: one normalized divergence map per denoising step.
 - `edit_map.png`: final binary edit-map plot, as in the original implementation.
 - `soft_edit_map.png`: temporally aggregated, smoothed map before thresholding.
 - `edit_map.npy`: the binary patch-grid mask, with 1 indicating editable patches.
-- `tdm_config.json`: selected blocks, midpoint times, and accumulation settings.
+- `attn_diff_config.json`: selected blocks, midpoint times, and accumulation settings.
 
 The same final edit indices drive the original KV-injection code. Use a separate
 output/visualization directory for each experiment; map filenames are reused on
@@ -215,7 +215,7 @@ by block during comparison; distances are computed in FP32. With 1024x1024 input
 of CPU RAM. Every midpoint is collected to provide the per-step visualizations;
 only the original accumulation window contributes to the final mask.
 
-For a baseline comparison, run the same command without `--tdm_attention`, using
+For a baseline comparison, run the same command without `--attn_diff`, using
 different output and visualization directories. No extra velocity mode is added.
 
 CPU-only implementation checks (no model weights required), in a project
@@ -228,7 +228,7 @@ python -m pytest tests
 
 ### Per-step masks with immediate K/V injection
 
-Add `--tdm_dynamic` alongside `--tdm_attention` to use each mask immediately:
+Add `--attn_diff_dynamic` alongside `--attn_diff` to use each mask immediately:
 
 ```bash
 python src/edit.py \
@@ -237,7 +237,7 @@ python src/edit.py \
     --target_prompt "A brown hat resting on a tree branch in a tropical jungle." \
     --name flux-dev --num_steps 15 --guidance 2 --front 2 --inject 4 \
     --controlnet_type none --offload \
-    --tdm_attention --tdm_dynamic \
+    --attn_diff --attn_diff_dynamic \
     --output_dir outputs/parrot_dynamic \
     --vis_path outputs/parrot_dynamic/maps
 ```
@@ -263,7 +263,7 @@ injection stage. For `num_steps=15`, `front=2`, and `inject=4`:
 | 14 | Original uninjected final step |
 
 There is no freeze-step parameter. Later delta maps remain available for
-inspection but do not update the frozen mask. Omitting `--tdm_dynamic` keeps the
+inspection but do not update the frozen mask. Omitting `--attn_diff_dynamic` keeps the
 existing attention-aggregation behavior; omitting both flags keeps velocity TDM.
 
 In addition to the existing delta maps, dynamic mode saves:
@@ -276,7 +276,7 @@ In addition to the existing delta maps, dynamic mode saves:
 - `mask_diagnostics.json`: injection/update status, mask source step, editable
   area, changed patch count versus the previous applied mask, and raw divergence
   min/max/mean/std at each step.
-- `tdm_config.json`: the actual update, freeze, and injection schedule. Its
+- `attn_diff_config.json`: the actual update, freeze, and injection schedule. Its
   temporal softmax scale is `null` because no temporal softmax is used.
 
 Dynamic mode also caches source K/V for the middle-stage intervals during

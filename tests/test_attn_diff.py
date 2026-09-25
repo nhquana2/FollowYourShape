@@ -9,7 +9,7 @@ import torch
 
 from flux.model import Flux, FluxParams
 from flux.sampling import build_inject_list, denoise, denoise_with_TDM
-from flux.tdm import MidpointAttentionTDM, PerStepAttentionMask, parse_attn_layers
+from flux.attn_diff import MidpointAttentionDifference, PerStepAttentionMask, parse_attn_layers
 
 
 def test_layer_selection_validation():
@@ -18,11 +18,11 @@ def test_layer_selection_validation():
         with pytest.raises(ValueError):
             parse_attn_layers(value)
     with pytest.raises(ValueError, match="indices"):
-        MidpointAttentionTDM([19], [0], num_blocks=19)
+        MidpointAttentionDifference([19], [0], num_blocks=19)
 
 
 def test_cache_is_detached_and_distance_is_mean_of_layer_norms():
-    cache = MidpointAttentionTDM([0, 2], [0], num_blocks=3)
+    cache = MidpointAttentionDifference([0, 2], [0], num_blocks=3)
     source = torch.zeros(1, 2, 2, dtype=torch.bfloat16, requires_grad=True)
     capture = cache.source_collector(0, 0.5)
     capture(0, source)
@@ -46,7 +46,7 @@ def test_cache_is_detached_and_distance_is_mean_of_layer_norms():
 
 
 def test_incomplete_or_misaligned_cache_fails_explicitly():
-    cache = MidpointAttentionTDM([0, 1], [0], num_blocks=2)
+    cache = MidpointAttentionDifference([0, 1], [0], num_blocks=2)
     assert cache.source_collector(1, 0.1) is None
     assert cache.target_collector(1, 0.1) is None
     with pytest.raises(RuntimeError, match="inversion first"):
@@ -83,7 +83,7 @@ def test_collection_reads_preprojection_image_output_without_changing_prediction
         )
         for layer in (0, 2)
     ]
-    cache = MidpointAttentionTDM([0, 2], [0], num_blocks=3)
+    cache = MidpointAttentionDifference([0, 2], [0], num_blocks=3)
     try:
         with torch.no_grad():
             baseline, _ = model(**inputs)
@@ -117,7 +117,7 @@ class TinyProbeModel:
             "second_order": info["second_order"] if info is not None else None,
             "edit_indices": info["edit_map"].tolist() if info is not None and info.get("edit_map") is not None else None,
         })
-        if info is not None and info.get("dynamic_tdm") is not None and info["inject"]:
+        if info is not None and info.get("dynamic_mask") is not None and info["inject"]:
             key = (info["t"], info["second_order"])
             if info["inverse"]:
                 self.kv_cache.add(key)
@@ -150,9 +150,9 @@ def run_tiny_edit(vis_path, attention=True, constant_attention=False, captured_s
         info["vis_path"] = str(vis_path)
     if attention:
         steps = range(num_steps) if captured_steps is None else captured_steps
-        info["attention_tdm"] = MidpointAttentionTDM([0, 2], steps, num_blocks=3)
+        info["attn_diff"] = MidpointAttentionDifference([0, 2], steps, num_blocks=3)
     if dynamic:
-        info["dynamic_tdm"] = PerStepAttentionMask(num_steps, front, num_steps - 4, tail=1)
+        info["dynamic_mask"] = PerStepAttentionMask(num_steps, front, num_steps - 4, tail=1)
     inputs = dict(
         img=torch.zeros(1, 6, 4), img_ids=torch.zeros(1, 6, 3),
         txt=torch.ones(1, 4, 8), txt_ids=torch.zeros(1, 4, 3), vec=torch.ones(1, 4),
@@ -182,7 +182,7 @@ def test_midpoint_pairing_mask_and_original_visualization_outputs(tmp_path, cons
     assert [call["time"] for call in target_captures] == pytest.approx(expected_midpoints)
     assert all(not call["controlled"] for call in target_captures)
     assert any(call["has_edit_map"] for call in model.calls)
-    assert not info["attention_tdm"].source
+    assert not info["attn_diff"].source
     assert torch.isfinite(result).all()
     assert set(info["map"]) == {"0_delta_map", "1_delta_map"}
 
@@ -200,7 +200,7 @@ def test_midpoint_pairing_mask_and_original_visualization_outputs(tmp_path, cons
         assert not mask.any()
     else:
         assert mask.any() and not mask.all()
-    config = json.loads((tmp_path / "tdm_config.json").read_text())
+    config = json.loads((tmp_path / "attn_diff_config.json").read_text())
     assert config["evaluation"] == "midpoint"
     assert config["block_indices_zero_based"] == [0, 2]
 
@@ -208,7 +208,7 @@ def test_midpoint_pairing_mask_and_original_visualization_outputs(tmp_path, cons
 def test_only_accumulation_steps_need_cache_without_visualizations():
     _, info, model, _ = run_tiny_edit(None, captured_steps=[0, 1])
     assert sum(call["capture"] for call in model.calls) == 4
-    assert not info["attention_tdm"].source
+    assert not info["attn_diff"].source
     assert info["edit_map"] is not None
 
 
@@ -218,4 +218,4 @@ def test_default_velocity_path_does_not_collect_attention(tmp_path):
     assert torch.isfinite(result).all()
     assert info["edit_map"] is not None
     assert (tmp_path / "edit_map.png").is_file()
-    assert not (tmp_path / "tdm_config.json").exists()
+    assert not (tmp_path / "attn_diff_config.json").exists()

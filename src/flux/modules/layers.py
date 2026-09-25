@@ -262,14 +262,14 @@ class SingleStreamBlock(nn.Module):
             feature_name_v = str(info['t']) + '_' + str(info['second_order']) + '_' + str(info['id']) + '_' + info['type'] + '_' + 'V'
 
             if info['inverse']:
-                if info.get('dynamic_tdm') is not None:
+                if info.get('dynamic_mask') is not None:
                     info['feature'][feature_name_k] = img_k.detach().to(device='cpu', copy=True)
                     info['feature'][feature_name_v] = img_v.detach().to(device='cpu', copy=True)
                 else:
                     info['feature'][feature_name_k] = img_k.cpu()
                     info['feature'][feature_name_v] = img_v.cpu()
             else:
-                dynamic = info.get('dynamic_tdm') is not None
+                dynamic = info.get('dynamic_mask') is not None
                 # Dynamic masks can change at every interval. Never overwrite
                 # cached source tensors when running on the same device (CPU).
                 source_img_k = info['feature'][feature_name_k].to(x.device, copy=dynamic)
