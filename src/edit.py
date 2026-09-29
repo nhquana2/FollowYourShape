@@ -1,3 +1,4 @@
+import math
 import os
 import re
 import time
@@ -239,6 +240,7 @@ def main(
         info['feature_path'] = args.feature_path
         info['feature'] = {}
         info['inject_step'] = args.inject
+        info['inject_kv'] = args.attn_diff_inject
 
         if args.vis_path is not None:
             info["vis_path"] = args.vis_path
@@ -269,19 +271,29 @@ def main(
             if not 0 <= args.front <= cut < len(timesteps) - 1:
                 raise ValueError("Attention difference requires a nonempty accumulation window; reduce --front or --inject")
             if args.attn_diff_dynamic:
+                fixed_mask = None
+                if args.attn_diff_fixed_mask is not None:  # DIAGNOSTIC ONLY
+                    grid = math.ceil(opts.height / 16), math.ceil(opts.width / 16)
+                    pixels = np.array(Image.open(args.attn_diff_fixed_mask).convert("L").resize((grid[1] * 16, grid[0] * 16), Image.NEAREST)) > 127
+                    fixed_mask = pixels.reshape(grid[0], 16, grid[1], 16).mean(axis=(1, 3)) > 0.5
+                    print(f"DIAGNOSTIC fixed mask {args.attn_diff_fixed_mask}: {fixed_mask.mean():.3f} of patches")
                 info['dynamic_mask'] = PerStepAttentionMask(
-                    len(timesteps) - 1, args.front, cut, tail=1,
+                    len(timesteps) - 1, args.front, cut, tail=1, fixed_mask=fixed_mask, free_steps=args.attn_diff_free_steps,
+                    sigma=args.attn_diff_sigma, freeze=not args.attn_diff_no_freeze,
+                    dilate=args.attn_diff_dilate,
                 )
             # Visualizations include every interval, matching the original delta
             # output. Only the original accumulation window determines the mask.
-            capture_steps = range(len(timesteps) - 1) if info.get('vis_path') else range(args.front, cut + 1)
+            capture_steps = range(len(timesteps) - 1) if info.get('vis_path') or args.attn_diff_no_freeze else range(args.front, cut + 1)
             info['attn_diff'] = MidpointAttentionDifference(
                 args.attn_diff_layers, capture_steps, num_blocks=len(model.double_blocks),
+                block_norm=args.attn_diff_block_norm,
             )
             print(f"Attention difference: midpoint outputs, zero-based blocks {args.attn_diff_layers}")
             if args.attn_diff_dynamic:
                 print(f"Dynamic masks: update steps {list(info['dynamic_mask'].update_steps)}, then freeze")
             print(f"Attention difference visualizations: {info['vis_path']}")
+
 
 
         print(timesteps)
@@ -313,7 +325,7 @@ def main(
         # denoise initial noise
 
         x, _ = denoise_with_TDM(model, **inp_target, timesteps=timesteps, guidance=guidance, inverse=False, info=info, width=opts.width, height=opts.height, inject_list=inject_list, tail_pad=1, front_pad=args.front,
-                                       controlnet=controlnet, control_patch=control_patch, controlnet_scale=controlnet_scale, controlnet_mode=control_mode, guidance_start=guidance_start, guidance_end=guidance_end)       
+                                       controlnet=controlnet, control_patch=control_patch, controlnet_scale=controlnet_scale, controlnet_mode=control_mode, guidance_start=guidance_start, guidance_end=guidance_end)
 
         
         if offload:
@@ -379,7 +391,7 @@ def main(
             else:
                 opts = None
 
-if __name__ == "__main__":
+def parse_args(argv=None):
     
     parser = argparse.ArgumentParser(description='RF-Edit')
 
@@ -417,10 +429,33 @@ if __name__ == "__main__":
                         help='comma-separated zero-based double-stream blocks for attention difference')
     parser.add_argument('--attn_diff_dynamic', action='store_true',
                         help='apply each attention mask immediately, then freeze the latest mask for later injection')
+    parser.add_argument('--attn_diff_free_steps', type=int, default=0,
+                        help='dynamic mode: skip K/V injection (all K/V from the target) for the first N mask-update steps')
+    # EXPERIMENT flags for the dynamic-mode ablation; defaults keep the current behavior.
+    parser.add_argument('--attn_diff_inject', default='kv', choices=['kv', 'k', 'v'],
+                        help='EXPERIMENT: which source features replace target features outside the mask')
+    parser.add_argument('--attn_diff_block_norm', action='store_true',
+                        help='EXPERIMENT: min-max normalize each block distance map before averaging blocks')
+    parser.add_argument('--attn_diff_sigma', type=float, default=0.7,
+                        help='EXPERIMENT: Gaussian sigma before Otsu in dynamic mode (0 disables smoothing)')
+    parser.add_argument('--attn_diff_dilate', type=int, default=0,
+                        help='EXPERIMENT: dilate each dynamic Otsu mask by this many patches')
+    parser.add_argument('--attn_diff_no_freeze', action='store_true',
+                        help='EXPERIMENT: dynamic mode keeps updating the mask until the last injected step')
+    parser.add_argument('--attn_diff_fixed_mask', default=None, type=str,
+                        help='DIAGNOSTIC ONLY: patch-aligned mask image that replaces every dynamic Otsu mask')
 
 
-    args = parser.parse_args()
+
+    args = parser.parse_args(argv)
     if args.attn_diff_dynamic and not args.attn_diff:
         parser.error('--attn_diff_dynamic requires --attn_diff')
+    if args.attn_diff_free_steps and not args.attn_diff_dynamic:
+        parser.error('--attn_diff_free_steps requires --attn_diff_dynamic')
+    if args.attn_diff_fixed_mask and not args.attn_diff_dynamic:
+        parser.error('--attn_diff_fixed_mask requires --attn_diff_dynamic')
+    return args
 
-    main(args)
+
+if __name__ == "__main__":
+    main(parse_args())
