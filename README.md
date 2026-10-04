@@ -148,11 +148,11 @@ python edit.py  --source_prompt [your source image prompt] \
 
 Please refer to the paper for the rationale and recommended values of the hyperparameters.
 
-## Optional Attention Difference
+## Attention Difference
 
-Add `--attn_diff` to an existing editing command to use attention-output
-divergence instead of the original velocity TDM. Without this flag, the original
-velocity path is used. No training, gradient optimization, or additional concept
+Add `--attn_diff` to an editing command to localize the edit with attention-output
+differences instead of the original velocity TDM. Without this flag, the original
+path is used unchanged. No training, gradient optimization, or additional concept
 tokens are involved.
 
 From the repository root, for example:
@@ -162,20 +162,18 @@ python src/edit.py \
     --source_img_dir src/examples/source/parrot.png \
     --source_prompt "A vibrant macaw perched on a tree branch in a tropical jungle." \
     --target_prompt "A brown hat resting on a tree branch in a tropical jungle." \
-    --name flux-dev --num_steps 15 --guidance 2 --front 2 --inject 3 \
-    --controlnet_type none --offload \
-    --attn_diff --attn_diff_layers 13,14,15,16,17,18 \
-    --output_dir outputs/parrot_attention \
-    --vis_path outputs/parrot_attention/maps
+    --name flux-dev --num_steps 15 --controlnet_type none --offload \
+    --attn_diff \
+    --output_dir outputs/parrot_attention
 ```
 
-`--attn_diff_layers` selects **zero-based double-stream block indices** (default:
-13 through 18). FLUX.1-dev has 19 double-stream blocks, indexed 0 through 18.
-The collector reads image-token attention outputs after attention heads are
-concatenated, before the output projection, gate, and residual addition. It does
-not extract attention-weight matrices or modify the captured activations.
+With `--attn_diff`, the defaults of `--guidance`, `--front`, and `--inject` become
+2, 0, and 3 (they stay 3, 2, and 4 otherwise). Values given on the command line
+always take precedence.
 
-For interval `k`, the attention variant computes:
+**Signal.** For denoising interval `k`, the map is the distance between the source
+and target image-token attention outputs, averaged over the selected double-stream
+blocks:
 
 ```text
 delta[k, patch] = mean_over_selected_blocks(
@@ -183,40 +181,69 @@ delta[k, patch] = mean_over_selected_blocks(
 )
 ```
 
-The source comes from the inversion midpoint evaluation. The target comes from
-the existing uninjected target-probe midpoint evaluation. The intervals are
-paired in reverse order, with an explicit midpoint-time check. These are different
-latent trajectories at matching times, not same-latent prompt contrast. Original
-FYS instead compares averages of start and midpoint velocities. Inversion guidance
-(1), target guidance, solver updates, probe passes, ControlNet behavior, and KV
-injection are retained. Start comparisons with ControlNet disabled to avoid its
-additional influence on the inversion features.
+The source comes from the inversion midpoint evaluation and the target from the
+uninjected target-probe midpoint evaluation of the same interval, with an explicit
+midpoint-time check. These are different latent trajectories at matching times.
+The collector reads attention outputs after the heads are concatenated, before the
+output projection, gate, and residual addition, and does not modify them.
+Inversion guidance (1), solver updates, probe passes, and ControlNet behavior are
+unchanged. No extra model passes are introduced.
 
-The attention maps use the original accumulation window, Gaussian smoothing
-(sigma 0.7), and Otsu thresholding. Temporal weights use `softmax(delta_stack)`
-without a scaling multiplier (equivalent to scale 1); velocity TDM retains
-`softmax(5 * delta_stack)`. A constant attention-divergence map is safely
-normalized to zeros.
+**Soft mask.** Each map is min-max normalized, Gaussian-smoothed, clipped to the
+range between two of its percentiles, rescaled to `[0, 1]`, and passed through a
+sigmoid:
 
-Visualizations are saved to `--vis_path`. In attention mode, omitting that option
-automatically saves them under `<output_dir>/attn_diff_visualization`:
+```text
+u    = clip((map - P_low) / (P_high - P_low), 0, 1)
+mask = sigmoid(steepness * (u - center))
+```
 
-- `delta/delta_map_<step>.png`: one normalized divergence map per denoising step.
-- `edit_map.png`: final binary edit-map plot, as in the original implementation.
-- `soft_edit_map.png`: temporally aggregated, smoothed map before thresholding.
-- `edit_map.npy`: the binary patch-grid mask, with 1 indicating editable patches.
-- `attn_diff_config.json`: selected blocks, midpoint times, and accumulation settings.
+The mask is applied to both evaluations of the solver update in the same interval,
+in the original single-stream injection blocks: V is blended as
+`mask * V_target + (1 - mask) * V_source`, and K is taken from the target where
+`mask > 0.5` (that is, `u > center`) and from the source elsewhere.
 
-The same final edit indices drive the original KV-injection code. Use a separate
-output/visualization directory for each experiment; map filenames are reused on
-reruns. Source attention is cached on CPU in its native dtype and released block
-by block during comparison; distances are computed in FP32. With 1024x1024 input,
-15 steps, six blocks, and 16-bit features, the extra source cache is about 2.1 GiB
-of CPU RAM. Every midpoint is collected to provide the per-step visualizations;
-only the original accumulation window contributes to the final mask.
+**Schedule.** Masks are updated up to the original TDM window end,
+`cut = num_steps - inject - 3` (the CLI uses a one-step uninjected tail), then
+frozen. For `num_steps=15` and the defaults:
 
-For a baseline comparison, run the same command without `--attn_diff`, using
-different output and visualization directories. No extra velocity mode is added.
+| Steps (zero-based) | K/V behavior |
+| --- | --- |
+| 0–9 | Fresh soft mask at every step, applied immediately |
+| 10–13 | Frozen mask from step 9 |
+| 14 | Original uninjected final step |
+
+With `--front N`, the first `N` steps instead inject the source everywhere
+(respecting an optional input mask), as in the original method.
+
+**Options.**
+
+| Option | Default | Meaning |
+| --- | --- | --- |
+| `--attn_diff_layers` | `0,...,18` | zero-based double-stream blocks used for the signal (FLUX.1-dev has 19) |
+| `--attn_diff_sigma` | `0.7` | Gaussian sigma in patches before the soft mask (0 disables smoothing) |
+| `--attn_diff_percentiles` | `50,98` | lower and upper percentiles rescaled to 0 and 1 |
+| `--attn_diff_center` | `0.3` | rescaled value where the mask is 0.5; lower values give larger masks |
+| `--attn_diff_steepness` | `15` | sigmoid steepness; higher values give a harder mask edge |
+
+**Outputs.** Visualizations are saved to `--vis_path`, or to
+`<output_dir>/attn_diff_visualization` when that option is omitted:
+
+- `delta/delta_map_<step>.png`: the normalized map of every denoising step.
+- `masks/soft_edit_map_<step>.png`: the smoothed map of each mask-update step.
+- `masks/edit_map_<step>.png` and `.npy`: the patches above 0.5 at that step, with
+  1 meaning target K and 0 meaning source K. The uninjected tail is all 1.
+- `edit_map.png`, `edit_map.npy`, `soft_edit_map.png`, `soft_mask.npy`: the final
+  frozen mask, its smoothed map, and its soft values.
+- `mask_diagnostics.json`: injection/update status, editable area, changed patch
+  count versus the previous step, and raw difference statistics at each step.
+- `attn_diff_config.json`: selected blocks, midpoint times, schedule, and soft-mask
+  settings.
+
+Use a separate output directory for each run; map filenames are reused. Source
+attention outputs and the source K/V of every injected step are cached on CPU
+during inversion and released as denoising consumes them, so peak CPU memory is
+higher than on the original path. `--offload` does not remove this cost.
 
 CPU-only implementation checks (no model weights required), in a project
 environment with the dependencies installed:
@@ -225,66 +252,6 @@ environment with the dependencies installed:
 python -m pip install pytest
 python -m pytest tests
 ```
-
-### Per-step masks with immediate K/V injection
-
-Add `--attn_diff_dynamic` alongside `--attn_diff` to use each mask immediately:
-
-```bash
-python src/edit.py \
-    --source_img_dir src/examples/source/parrot.png \
-    --source_prompt "A vibrant macaw perched on a tree branch in a tropical jungle." \
-    --target_prompt "A brown hat resting on a tree branch in a tropical jungle." \
-    --name flux-dev --num_steps 15 --guidance 2 --front 2 --inject 4 \
-    --controlnet_type none --offload \
-    --attn_diff --attn_diff_dynamic \
-    --output_dir outputs/parrot_dynamic \
-    --vis_path outputs/parrot_dynamic/maps
-```
-
-This mode uses the existing uninjected midpoint probe to compute attention
-divergence. Each map is independently normalized, Gaussian-smoothed (sigma 0.7),
-and Otsu-thresholded, without temporal aggregation or temporal softmax. The new
-mask is applied to both evaluations of the actual solver update in that same
-interval. Editable patches retain target K/V; other patches receive source K/V.
-The selected attention blocks and original single-stream injection blocks are
-unchanged. No extra model passes, training, or prompt parsing are introduced.
-
-Mask updates stop automatically at the original TDM window end:
-`cut = num_steps - inject - 3` (the CLI uses a one-step uninjected tail).
-The latest mask is then frozen, including the gap before the original late
-injection stage. For `num_steps=15`, `front=2`, and `inject=4`:
-
-| Steps (zero-based) | K/V behavior |
-| --- | --- |
-| 0–1 | Original initial source injection (respecting an optional input mask) |
-| 2–8 | Fresh per-step mask, applied immediately |
-| 9–13 | Frozen mask from step 8 |
-| 14 | Original uninjected final step |
-
-There is no freeze-step parameter. Later delta maps remain available for
-inspection but do not update the frozen mask. Omitting `--attn_diff_dynamic` keeps the
-existing attention-aggregation behavior; omitting both flags keeps velocity TDM.
-
-In addition to the existing delta maps, dynamic mode saves:
-
-- `masks/edit_map_<step>.png` and `.npy`: the mask actually applied at that step,
-  with 1 meaning target K/V and 0 meaning source K/V. The uninjected tail is all 1.
-- `masks/soft_edit_map_<step>.png`: the smoothed map for each mask-update step.
-- `edit_map.png`, `edit_map.npy`, `soft_edit_map.png`: the final frozen mask and
-  its smoothed map, not the all-1 tail mask.
-- `mask_diagnostics.json`: injection/update status, mask source step, editable
-  area, changed patch count versus the previous applied mask, and raw divergence
-  min/max/mean/std at each step.
-- `attn_diff_config.json`: the actual update, freeze, and injection schedule. Its
-  temporal softmax scale is `null` because no temporal softmax is used.
-
-Dynamic mode also caches source K/V for the middle-stage intervals during
-inversion, at both solver evaluations. This increases peak CPU memory usage;
-features are released as denoising consumes them. At 1024x1024, with 16-bit K/V
-and the settings in the table, the eight additional intervals require about
-13.5 GiB of CPU RAM on top of the existing caches. `--offload` does not remove
-this CPU-memory cost. Use separate output directories when comparing variants.
 
 
 # 🖋️ Citation

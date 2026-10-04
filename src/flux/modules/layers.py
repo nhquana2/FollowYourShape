@@ -282,6 +282,10 @@ class SingleStreamBlock(nn.Module):
                 edit_indices = info['edit_map'] if info['edit_map'] is not None else info.get('mask')
                 if edit_indices is not None:
                     source_img_k[:, :, edit_indices, ...] = img_k[:, :, edit_indices, ...]
+                if info.get('edit_weight') is not None:
+                    # Soft mask: V blends from source to target by the per-patch weight; K keeps the hard switch.
+                    source_img_v = torch.lerp(source_img_v, img_v, info['edit_weight'].to(img_v)[None, None, :, None])
+                elif edit_indices is not None:
                     source_img_v[:, :, edit_indices, ...] = img_v[:, :, edit_indices, ...]
 
                 k = torch.cat((txt_k, source_img_k), dim=2)

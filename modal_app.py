@@ -30,6 +30,7 @@ GPU = os.environ.get("FYS_GPU", "L40S")
 
 VOLUME_ROOT = "/mnt/follow-your-shape"
 SRC = "/root/FollowYourShape/src"
+EXPERIMENTS = "/root/FollowYourShape/experiments"  # run with --script ../experiments/<name>.py
 LOCAL_ROOT = Path(__file__).resolve().parent
 
 image = (
@@ -56,6 +57,7 @@ image = (
         LOCAL_ROOT / "src", SRC,
         ignore=["**/__pycache__/**", "examples/edit-result/**", "examples/edit-map-visualization/**"],
     )
+    .add_local_dir(LOCAL_ROOT / "experiments", EXPERIMENTS, ignore=["**/__pycache__/**", "*.html"])
 )
 
 app = modal.App("follow-your-shape", image=image)

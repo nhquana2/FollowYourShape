@@ -109,6 +109,7 @@ class TinyProbeModel:
 
     def __call__(self, *, img, timesteps, txt, info=None, attn_capture=None, **kwargs):
         self.calls.append({
+            "condition": float(txt.mean()), "latent": img.clone(),
             "time": float(timesteps[0]), "capture": attn_capture is not None,
             "inverse": info is not None and info["inverse"],
             "controlled": info is not None,
@@ -116,6 +117,7 @@ class TinyProbeModel:
             "inject": info is not None and info["inject"],
             "second_order": info["second_order"] if info is not None else None,
             "edit_indices": info["edit_map"].tolist() if info is not None and info.get("edit_map") is not None else None,
+            "edit_weight": info["edit_weight"].tolist() if info is not None and info.get("edit_weight") is not None else None,
         })
         if info is not None and info.get("dynamic_mask") is not None and info["inject"]:
             key = (info["t"], info["second_order"])
@@ -139,7 +141,7 @@ class TinyProbeModel:
 
 
 def run_tiny_edit(vis_path, attention=True, constant_attention=False, captured_steps=None,
-                  dynamic=False, front=0, schedule=None):
+                  front=0, schedule=None, **mask_options):
     # A nonuniform schedule catches incorrectly paired inversion intervals.
     if schedule is None:
         schedule = [1.0, 0.8, 0.55, 0.3, 0.1, 0.0]
@@ -148,16 +150,15 @@ def run_tiny_edit(vis_path, attention=True, constant_attention=False, captured_s
     info = {"inject_step": 1, "feature": {}}
     if vis_path is not None:
         info["vis_path"] = str(vis_path)
-    if attention:
-        steps = range(num_steps) if captured_steps is None else captured_steps
-        info["attn_diff"] = MidpointAttentionDifference([0, 2], steps, num_blocks=3)
-    if dynamic:
-        info["dynamic_mask"] = PerStepAttentionMask(num_steps, front, num_steps - 4, tail=1)
     inputs = dict(
         img=torch.zeros(1, 6, 4), img_ids=torch.zeros(1, 6, 3),
         txt=torch.ones(1, 4, 8), txt_ids=torch.zeros(1, 4, 3), vec=torch.ones(1, 4),
     )
-    model = TinyProbeModel(constant_attention, vary_attention=dynamic)
+    if attention:  # Attention Difference always runs with its per-step masks.
+        steps = range(num_steps) if captured_steps is None else captured_steps
+        info["attn_diff"] = MidpointAttentionDifference([0, 2], steps, num_blocks=3)
+        info["dynamic_mask"] = PerStepAttentionMask(num_steps, front, num_steps - 4, tail=1, **mask_options)
+    model = TinyProbeModel(constant_attention, vary_attention=attention)
     noise, info = denoise(model, **inputs, timesteps=schedule, inverse=True, info=info,
                           inject_list=inject_list, guidance=1)
     inputs["img"] = noise
@@ -170,9 +171,8 @@ def run_tiny_edit(vis_path, attention=True, constant_attention=False, captured_s
     return result, info, model, schedule
 
 
-@pytest.mark.parametrize("constant_attention", [False, True])
-def test_midpoint_pairing_mask_and_original_visualization_outputs(tmp_path, constant_attention):
-    result, info, model, schedule = run_tiny_edit(tmp_path, constant_attention=constant_attention)
+def test_midpoint_pairing_of_inversion_and_target_probes(tmp_path):
+    result, info, model, schedule = run_tiny_edit(tmp_path)
     num_steps = len(schedule) - 1
     assert len(model.calls) == 6 * num_steps  # Original solver/probe call count.
     source_captures = [call for call in model.calls if call["capture"] and call["inverse"]]
@@ -181,35 +181,12 @@ def test_midpoint_pairing_mask_and_original_visualization_outputs(tmp_path, cons
     assert [call["time"] for call in source_captures] == pytest.approx(expected_midpoints[::-1])
     assert [call["time"] for call in target_captures] == pytest.approx(expected_midpoints)
     assert all(not call["controlled"] for call in target_captures)
-    assert any(call["has_edit_map"] for call in model.calls)
     assert not info["attn_diff"].source
     assert torch.isfinite(result).all()
-    assert set(info["map"]) == {"0_delta_map", "1_delta_map"}
-
-    for step in range(num_steps):
-        with Image.open(tmp_path / "delta" / f"delta_map_{step}.png") as image:
-            assert image.size == (3, 2)
-    for filename in ("edit_map.png", "soft_edit_map.png"):
-        with Image.open(tmp_path / filename) as image:
-            image.verify()
-    mask = np.load(tmp_path / "edit_map.npy")
-    assert mask.shape == (2, 3)
-    assert set(np.unique(mask)) <= {0, 1}
-    np.testing.assert_array_equal(np.flatnonzero(mask), info["edit_map"].numpy())
-    if constant_attention:
-        assert not mask.any()
-    else:
-        assert mask.any() and not mask.all()
     config = json.loads((tmp_path / "attn_diff_config.json").read_text())
     assert config["evaluation"] == "midpoint"
     assert config["block_indices_zero_based"] == [0, 2]
-
-
-def test_only_accumulation_steps_need_cache_without_visualizations():
-    _, info, model, _ = run_tiny_edit(None, captured_steps=[0, 1])
-    assert sum(call["capture"] for call in model.calls) == 4
-    assert not info["attn_diff"].source
-    assert info["edit_map"] is not None
+    assert config["soft_mask"] == {"gaussian_sigma": 0.7, "percentiles": [50, 98], "center": 0.3, "steepness": 15}
 
 
 def test_default_velocity_path_does_not_collect_attention(tmp_path):

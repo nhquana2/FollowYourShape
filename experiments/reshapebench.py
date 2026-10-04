@@ -1,13 +1,14 @@
-"""ReShapeBench: original FYS vs dynamic Attention Difference, scored with AS, CLIP, CLIP-dir, CLIP-I and DINO.
+"""ReShapeBench: original FYS vs Attention Difference, scored with AS, CLIP, CLIP-dir, CLIP-I and DINO.
 
 Run from the repository root:
 
     python experiments/reshapebench.py prepare                             # copy images, write jobs
     python experiments/reshapebench.py run --profile fys2 --containers 8   # edit on Modal, download
+    python experiments/run_parallel.py <jobs.json> --name reshapebench      # or: run one jobs file, resumable
     python experiments/reshapebench.py metrics --profile fys2              # AS, CLIP, CLIP-dir, CLIP-I, DINO
 
-Both methods use the FYS paper config (Table 3: 15 steps, guidance 2, k_front 2, k_tail 3) without
-ControlNet. Editing starts from the inverted source latent, so edit.py draws no random noise and
+FYS uses its paper config (Table 3: 15 steps, guidance 2, k_front 2, k_tail 3); Attention Difference uses
+the same steps, guidance and k_tail with k_front 0. Neither uses ControlNet. Editing starts from the inverted source latent, so edit.py draws no random noise and
 results depend only on the arguments and the code. `run` records the code hash in the run manifest,
 and is resumable: finished edits are skipped. Results land in outputs/modal/reshapebench/<method>/<id>.
 """
@@ -31,13 +32,14 @@ RESULTS = ROOT / "outputs/modal/reshapebench"
 BATCH = "reshapebench"  # volume folder: runs/reshapebench/<method>/<id>
 SUBSETS = {"single": "single_object", "multi": "multi_object"}
 
-BASE = "--name flux-dev --num_steps 15 --guidance 2 --front 2 --inject 3 --controlnet_type none --offload"
+COMMON = "--name flux-dev --num_steps 15 --controlnet_type none --offload"
 METHODS = {
-    "fys": BASE,  # original FYS path: no attention-difference flags
-    "attn_dyn": BASE + " --attn_diff --attn_diff_dynamic --attn_diff_layers " + ",".join(map(str, range(19)))
-                + " --attn_diff_sigma 0.7 --attn_diff_dilate 1",
+    "fys": COMMON + " --guidance 2 --front 2 --inject 3",  # original FYS path: no attention-difference flags
+    # Per-step soft masks (P50-P98 range, sigmoid centre 0.3, steepness 15), guidance 2, front 0, inject 3: the defaults.
+    "attn_q_f0": COMMON + " --attn_diff",
 }
-METHODS["attn_dyn_f1"] = METHODS["attn_dyn"].replace("--front 2", "--front 1")  # one fewer global injection step
+# Upper anchor at P90: weaker signal reaches the mask (larger masks).
+METHODS["attn_q_f0_p90"] = METHODS["attn_q_f0"] + " --attn_diff_percentiles 50,90"
 # CLIP-I and DINO compare the edit with the source image (no ground-truth edits exist): higher = more preserved.
 # Background metrics use the ReShapeBench mask: bg PSNR over background pixels; bg LPIPS (x1e3, SqueezeNet) and
 # bg PSNR (PIE) on both images with the mask region zeroed, as in PIE-Bench. Values: (label, format, scale).

@@ -330,37 +330,34 @@ def denoise_with_TDM(
 
     print(f"Cutting at {cut} step")
 
+    # Attention Difference: a per-step soft mask from the attention outputs replaces the velocity TDM.
     attn_diff = info.get('attn_diff') if info is not None else None
     dynamic_mask = info.get('dynamic_mask') if info is not None else None
+    if (attn_diff is None) != (dynamic_mask is None):
+        raise ValueError("Attention difference and its per-step masks must be set together")
     if dynamic_mask is not None:
         dynamic_mask.validate(attn_diff, len(timesteps) - 1)
         if (
             inverse or dynamic_mask.front != front_pad or dynamic_mask.freeze_step != cut
             or dynamic_mask.inject_end != len(timesteps) - 1 - tail_pad
         ):
-            raise ValueError("Dynamic mask boundaries must match the denoising TDM window and tail")
-        print(f"Dynamic K/V injection steps: {list(range(dynamic_mask.inject_end))}")
-    if attn_diff is not None:
-        if not 0 <= front_pad <= cut < len(timesteps) - 1:
-            raise ValueError("Attention difference requires a nonempty accumulation window; reduce --front or --inject")
+            raise ValueError("Mask boundaries must match the denoising TDM window and tail")
+        print(f"Masked K/V injection steps: {[i for i in range(len(timesteps) - 1) if dynamic_mask.injects(i)]}")
         vis_dir = info.get('vis_path')
         if vis_dir:
             os.makedirs(vis_dir, exist_ok=True)
             with open(os.path.join(vis_dir, 'attn_diff_config.json'), 'w', encoding='utf-8') as stream:
                 json.dump({
-                    'signal': 'attention',
                     'evaluation': 'midpoint',
-                    'mask_mode': 'per_step' if dynamic_mask is not None else 'aggregate',
-                    'block_indices_zero_based': list(attn_diff.layers),
-                    'aggregation_steps_zero_based': [] if dynamic_mask is not None else list(range(front_pad, cut + 1)),
-                    'mask_update_steps_zero_based': list(dynamic_mask.update_steps) if dynamic_mask is not None else [cut],
-                    'freeze_step_zero_based': cut,
-                    'injection_steps_zero_based': [i for i in range(len(timesteps) - 1)
-                                                  if (dynamic_mask.injects(i) if dynamic_mask is not None else inject_list[i])],
                     'source_midpoints': attn_diff.midpoints,
+                    'block_indices_zero_based': list(attn_diff.layers),
+                    'mask_update_steps_zero_based': list(dynamic_mask.update_steps),
+                    'freeze_step_zero_based': cut,
+                    'injection_steps_zero_based': [i for i in range(len(timesteps) - 1) if dynamic_mask.injects(i)],
+                    'step_times': timesteps,
                     'target_guidance': guidance,
-                    'postprocessing': {'temporal_softmax_scale': None if dynamic_mask is not None else 1,
-                                       'gaussian_sigma': 0.7, 'threshold': 'otsu'},
+                    'soft_mask': {'gaussian_sigma': dynamic_mask.sigma, 'percentiles': list(dynamic_mask.percentiles),
+                                  'center': dynamic_mask.center, 'steepness': dynamic_mask.steepness},
                 }, stream, indent=2)
 
     if info is not None:
@@ -375,6 +372,8 @@ def denoise_with_TDM(
 
         step =  f'step{ i}'
         pred_src = info['inv_noise'][step]
+
+        vis_dir = info.get("vis_path", None)
 
         pred_tar, _ = model(
             img=img,
@@ -410,7 +409,6 @@ def denoise_with_TDM(
         else:
             delta = capture.result() if capture is not None else None
 
-        vis_dir = info.get("vis_path", None)
         delta_map = None
         if delta is not None:
             delta_min = delta.min()
@@ -440,14 +438,16 @@ def denoise_with_TDM(
             )
             if edit_indices is not None:
                 info['edit_map'] = edit_indices
+            # The soft mask weights V in the masked steps; front steps keep the hard injection.
+            masked = dynamic_mask.injects(i) and i >= dynamic_mask.front
+            info['edit_weight'] = torch.from_numpy(dynamic_mask.weight).flatten().to(img) if masked else None
 
         if dynamic_mask is None and i == cut:
             delta_stack = torch.stack([v for k, v in info['map'].items() if k.endswith("_delta_map")], dim=0)  # [N, H_patch, W_patch]
             # np.save("delta_stack.npy", delta_stack.cpu().to(torch.float32).numpy())
-            
-            # Attention uses unscaled logits; retain the original velocity scale.
-            softmax_input = delta_stack if attn_diff is not None else delta_stack * 5
-            softmax_weights = F.softmax(softmax_input, dim=0)  # [N, H, W]
+
+            scale = 5
+            softmax_weights = F.softmax(delta_stack * scale, dim=0)  # [N, H, W]
             soft_mask = (delta_stack * softmax_weights).sum(dim=0)  # [H, W]
             soft_np = soft_mask.to(torch.float32).cpu().numpy()  # [H_patch, W_patch]
             smoothed_np = gaussian_filter(soft_np, sigma=0.7)
@@ -486,9 +486,6 @@ def denoise_with_TDM(
                 plt.title("Edit Map")
                 plt.savefig(os.path.join(vis_dir, "edit_map.png"))
                 plt.close()
-                if attn_diff is not None:
-                    plt.imsave(os.path.join(vis_dir, "soft_edit_map.png"), smoothed_np, cmap='viridis')
-                    np.save(os.path.join(vis_dir, "edit_map.npy"), smoothed_binary_np)
                 print("Saved edit map visualization to edit_map.png")
 
 

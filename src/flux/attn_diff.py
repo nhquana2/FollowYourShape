@@ -1,4 +1,4 @@
-"""Midpoint attention collection and optional per-step mask control."""
+"""Midpoint attention collection and per-step soft masks for Attention Difference."""
 
 import json
 import math
@@ -104,22 +104,36 @@ class MidpointAttentionDifference:
 
 
 class PerStepAttentionMask:
-    """Update a mask before each controlled solver step, then freeze it.
+    """Turn each step's attention-difference map into a soft mask, then freeze it.
 
-    All indices refer to the forward denoising schedule. The original front
-    stabilization and uninjected tail are retained; middle steps now inject KV.
+    All indices refer to the forward denoising schedule: `front` steps inject the source
+    everywhere, the mask is updated from `front` to `cut` and reused until the uninjected
+    tail. A map is smoothed, clipped to the range between two percentiles, rescaled to
+    [0, 1] and passed through a sigmoid. The soft values weight V, and patches above 0.5
+    take the target K.
     """
 
-    def __init__(self, num_steps: int, front: int, cut: int, tail: int = 1):
+    def __init__(self, num_steps: int, front: int, cut: int, tail: int = 1, sigma: float = 0.7,
+                 percentiles: tuple[float, float] = (50, 98), center: float = 0.3, steepness: float = 15):
+        self.sigma = sigma
+        self.percentiles = tuple(percentiles)
+        self.center = center
+        self.steepness = steepness
+        if not (len(self.percentiles) == 2 and 0 <= self.percentiles[0] < self.percentiles[1] <= 100):
+            raise ValueError("Percentiles must be lower,upper with 0 <= lower < upper <= 100")
+        if steepness <= 0:
+            raise ValueError("Steepness must be positive")
         self.num_steps = num_steps
         self.front = front
         self.freeze_step = cut
         self.inject_end = num_steps - tail
         if not 0 <= front <= cut < self.inject_end <= num_steps:
-            raise ValueError("Dynamic attention difference requires a nonempty mask window before the uninjected tail")
-        self.update_steps = range(front, self.freeze_step + 1)
-        self.mask = None
+            raise ValueError("Attention difference requires a nonempty mask window before the uninjected tail")
+        self.update_steps = range(front, cut + 1)
+        self.soft = None  # soft mask of the latest update
+        self.mask = None  # its patches above 0.5
         self.mask_step = None
+        self.weight = None  # target weight per patch for the step being run
         self.previous_applied = None
         self.diagnostics = []
 
@@ -128,42 +142,58 @@ class PerStepAttentionMask:
 
     def validate(self, attn_diff: MidpointAttentionDifference | None, num_steps: int) -> None:
         if attn_diff is None:
-            raise ValueError("Dynamic masks require attention difference")
+            raise ValueError("Per-step masks require attention difference")
         if num_steps != self.num_steps:
-            raise ValueError("Dynamic mask schedule does not match the sampler")
+            raise ValueError("Mask schedule does not match the sampler")
         if not set(self.update_steps).issubset(attn_diff.steps):
-            raise ValueError("Attention capture must cover every dynamic mask update step")
+            raise ValueError("Attention capture must cover every mask update step")
+
+    def smooth(self, values: Tensor):
+        from scipy.ndimage import gaussian_filter
+
+        smoothed = values.detach().float().cpu().numpy()
+        return gaussian_filter(smoothed, sigma=self.sigma) if self.sigma > 0 else smoothed
+
+    def soft_mask(self, smoothed):
+        """Clip to the range between the two percentiles, rescale to [0, 1], then a sigmoid centred on `center`."""
+        import numpy as np
+
+        low, high = np.percentile(smoothed, self.percentiles)
+        scaled = np.clip((smoothed - low) / max(high - low, 1e-12), 0, 1)
+        return (1 / (1 + np.exp(-self.steepness * (scaled - self.center)))).astype(np.float32)
 
     def process(self, step: int, delta_map: Tensor | None, raw_delta: Tensor | None,
                 grid_shape: tuple[int, int], initial_edit_indices: Tensor | None = None,
                 vis_dir: str | None = None) -> Tensor | None:
         """Return new edit indices only when updating; record the applied mask."""
         import numpy as np
-        from scipy.ndimage import gaussian_filter
-        from skimage.filters import threshold_otsu
 
         updated = step in self.update_steps
         edit_indices = None
         smoothed = None
         if updated:
             if delta_map is None:
-                raise RuntimeError(f"Missing attention map for dynamic mask step {step}")
-            smoothed = gaussian_filter(delta_map.detach().float().cpu().numpy(), sigma=0.7)
-            self.mask = (smoothed > threshold_otsu(smoothed)).astype(np.uint8)
+                raise RuntimeError(f"Missing attention map for mask step {step}")
+            smoothed = self.smooth(delta_map)
+            self.soft = self.soft_mask(smoothed)
+            self.mask = (self.soft > 0.5).astype(np.uint8)
             self.mask_step = step
             edit_indices = torch.from_numpy(np.flatnonzero(self.mask)).to(delta_map.device)
 
         if not self.injects(step):
             # No source injection means all patches retain target KV.
             applied = np.ones(grid_shape, dtype=np.uint8)
+            self.weight = applied.astype(np.float32)
         elif step < self.front:
             applied = np.zeros(grid_shape, dtype=np.uint8)
             if initial_edit_indices is not None:
                 applied.flat[initial_edit_indices.detach().cpu().numpy()] = 1
+            self.weight = applied.astype(np.float32)
         elif self.mask is None:
-            raise RuntimeError("No dynamic mask available before selective injection")
+            raise RuntimeError("No mask available before selective injection")
         else:
             applied = self.mask.copy()
+            self.weight = self.soft
 
         stats = None
         if raw_delta is not None:
@@ -174,7 +204,7 @@ class PerStepAttentionMask:
         self.diagnostics.append({
             "step": step, "injection": self.injects(step), "mask_updated": updated,
             "mask_source_step": self.mask_step,
-            "frozen": self.injects(step) and step > self.freeze_step,
+            "frozen": self.injects(step) and step > self.update_steps[-1],
             "editable_patches": int(applied.sum()), "editable_fraction": float(applied.mean()),
             "changed_patches": changed, "raw_divergence": stats,
         })
@@ -190,7 +220,7 @@ class PerStepAttentionMask:
             np.save(mask_dir / f"edit_map_{step}.npy", applied)
             if updated:
                 plt.imsave(mask_dir / f"soft_edit_map_{step}.png", smoothed, cmap="viridis", vmin=0, vmax=1)
-            if step == self.freeze_step:
+            if step == self.update_steps[-1]:
                 plt.figure()
                 plt.imshow(self.mask, cmap="viridis", vmin=0, vmax=1)
                 plt.colorbar()
@@ -199,5 +229,6 @@ class PerStepAttentionMask:
                 plt.close()
                 plt.imsave(root / "soft_edit_map.png", smoothed, cmap="viridis", vmin=0, vmax=1)
                 np.save(root / "edit_map.npy", self.mask)
+                np.save(root / "soft_mask.npy", self.soft)
             (root / "mask_diagnostics.json").write_text(json.dumps(self.diagnostics, indent=2), encoding="utf-8")
         return edit_indices
