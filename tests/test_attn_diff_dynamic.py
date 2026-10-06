@@ -216,3 +216,23 @@ def test_real_block_blends_values_by_soft_weight_and_switches_keys_by_mask(monke
     expected_v = target_v.clone()
     expected_v[:, :, 512:] = torch.lerp(source_v[:, :, 512:], target_v[:, :, 512:], weight[None, None, :, None])
     torch.testing.assert_close(blended_v, expected_v)
+
+
+def test_free_steps_skip_injection_but_still_update_masks(tmp_path):
+    schedule = [1.0, 0.9, 0.75, 0.6, 0.4, 0.25, 0.1, 0.0]
+    _, info, model, _ = run_tiny_edit(tmp_path, front=1, schedule=schedule, free_steps=2)
+    num_steps = len(schedule) - 1
+    assert not model.kv_cache  # Free steps are neither cached during inversion nor consumed.
+    controlled = [call for call in model.calls if call["controlled"] and not call["inverse"]]
+    injected = [controlled[2 * step]["inject"] for step in range(num_steps)]
+    assert injected == [True, False, False, True, True, True, False]
+    diagnostics = json.loads((tmp_path / "mask_diagnostics.json").read_text())
+    assert [item["step"] for item in diagnostics if item["mask_updated"]] == [1, 2, 3, 4, 5]
+    for step in (1, 2):  # Masks are computed, but every patch keeps target K/V.
+        assert np.load(tmp_path / "masks" / f"edit_map_{step}.npy").all()
+    assert controlled[6]["edit_indices"] == np.flatnonzero(np.load(tmp_path / "masks" / "edit_map_3.npy")).tolist()
+    config = json.loads((tmp_path / "attn_diff_config.json").read_text())
+    assert config["injection_steps_zero_based"] == [0, 3, 4, 5]
+    assert config["free_steps_zero_based"] == [1, 2]
+    with pytest.raises(ValueError, match="free_steps"):
+        PerStepAttentionMask(7, front=1, cut=3, free_steps=6)

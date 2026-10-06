@@ -358,6 +358,7 @@ def denoise_with_TDM(
                     'target_guidance': guidance,
                     'soft_mask': {'gaussian_sigma': dynamic_mask.sigma, 'percentiles': list(dynamic_mask.percentiles),
                                   'center': dynamic_mask.center, 'steepness': dynamic_mask.steepness},
+                    'free_steps_zero_based': list(dynamic_mask.free_steps),
                 }, stream, indent=2)
 
     if info is not None:

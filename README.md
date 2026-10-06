@@ -228,6 +228,7 @@ With `--front N`, the first `N` steps instead inject the source everywhere
 | `--attn_diff_center` | `0.3` | rescaled value where the mask is 0.5; lower values give larger masks |
 | `--attn_diff_steepness` | `15` | sigmoid steepness; higher values give a harder mask edge |
 | `--attn_diff_freeze` | off | stop updating the mask after the original TDM window and reuse it for the remaining injected steps |
+| `--attn_diff_free_steps` | `0` | skip K/V injection for the first N mask-update steps (every patch keeps the target K/V); their masks are still computed |
 
 **Outputs.** Visualizations are saved to `--vis_path`, or to
 `<output_dir>/attn_diff_visualization` when that option is omitted:

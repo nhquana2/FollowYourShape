@@ -271,7 +271,7 @@ def main(
             info['dynamic_mask'] = PerStepAttentionMask(
                 len(timesteps) - 1, args.front, cut, tail=1, sigma=args.attn_diff_sigma,
                 percentiles=args.attn_diff_percentiles, center=args.attn_diff_center, steepness=args.attn_diff_steepness,
-                freeze=args.attn_diff_freeze,
+                free_steps=args.attn_diff_free_steps, freeze=args.attn_diff_freeze,
             )
             # Visualizations include every interval; only the update steps determine the masks.
             capture_steps = range(len(timesteps) - 1) if info.get('vis_path') else info['dynamic_mask'].update_steps
@@ -428,6 +428,8 @@ def parse_args(argv=None):
     parser.add_argument('--attn_diff_freeze', action='store_true',
                         help='update the mask only up to the original TDM window end (num_steps - inject - 3) and reuse '
                              'it for the remaining injected steps; by default it is updated at every injected step')
+    parser.add_argument('--attn_diff_free_steps', type=int, default=0,
+                        help='skip K/V injection (all K/V from the target) for the first N mask-update steps')
 
     args = parser.parse_args(argv)
     # Attention Difference runs with its own schedule unless values are given explicitly.
