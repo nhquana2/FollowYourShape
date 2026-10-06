@@ -16,7 +16,7 @@ from test_attn_diff import run_tiny_edit
 def test_same_step_injection_freezing_and_saved_applied_masks(tmp_path, constant_attention):
     result, info, model, schedule = run_tiny_edit(
         tmp_path, front=1, constant_attention=constant_attention,
-        schedule=[1.0, 0.9, 0.75, 0.6, 0.4, 0.25, 0.1, 0.0],
+        schedule=[1.0, 0.9, 0.75, 0.6, 0.4, 0.25, 0.1, 0.0], freeze=True,
     )
     num_steps = len(schedule) - 1
     assert torch.isfinite(result).all()
@@ -75,6 +75,26 @@ def test_same_step_injection_freezing_and_saved_applied_masks(tmp_path, constant
     assert config["injection_steps_zero_based"] == list(range(6))
 
 
+def test_masks_update_at_every_injected_step_by_default(tmp_path):
+    _, info, model, schedule = run_tiny_edit(tmp_path, front=1, schedule=[1.0, 0.9, 0.75, 0.6, 0.4, 0.25, 0.1, 0.0])
+    num_steps = len(schedule) - 1
+    assert len(model.calls) == num_steps * 6  # No additional model evaluations.
+    assert not model.kv_cache and not info["attn_diff"].source
+    controlled = [call for call in model.calls if call["controlled"] and not call["inverse"]]
+    masks = [np.load(tmp_path / "masks" / f"edit_map_{i}.npy") for i in range(num_steps)]
+    for step in range(1, num_steps - 1):  # Every injected step after the front applies its own mask.
+        assert controlled[2 * step]["edit_indices"] == np.flatnonzero(masks[step]).tolist()
+        assert (tmp_path / "masks" / f"soft_edit_map_{step}.png").is_file()
+    np.testing.assert_array_equal(masks[5], np.load(tmp_path / "edit_map.npy"))
+    assert info["edit_map"].tolist() == np.flatnonzero(masks[5]).tolist()
+    diagnostics = json.loads((tmp_path / "mask_diagnostics.json").read_text())
+    assert [item["step"] for item in diagnostics if item["mask_updated"]] == [1, 2, 3, 4, 5]
+    assert not any(item["frozen"] for item in diagnostics)
+    config = json.loads((tmp_path / "attn_diff_config.json").read_text())
+    assert config["mask_update_steps_zero_based"] == [1, 2, 3, 4, 5]
+    assert config["freeze_step_zero_based"] is None
+
+
 def test_soft_mask_rescales_between_percentiles_before_the_sigmoid():
     values = np.arange(101, dtype=np.float64).reshape(1, 101)  # The percentile p of this map is the value p.
     policy = PerStepAttentionMask(5, front=0, cut=1)
@@ -94,10 +114,13 @@ def test_soft_mask_rescales_between_percentiles_before_the_sigmoid():
 
 
 def test_dynamic_window_only_capture_without_visualization():
-    _, info, model, _ = run_tiny_edit(None, captured_steps=[0, 1])
+    _, info, model, _ = run_tiny_edit(None, captured_steps=[0, 1], freeze=True)
     assert not model.kv_cache
     assert info["dynamic_mask"].mask_step == 1
     assert sum(call["capture"] for call in model.calls) == 4
+    _, info, model, _ = run_tiny_edit(None, captured_steps=[0, 1, 2, 3])
+    assert info["dynamic_mask"].mask_step == 3
+    assert sum(call["capture"] for call in model.calls) == 8
 
 
 def test_dynamic_schedule_validation():
@@ -108,6 +131,8 @@ def test_dynamic_schedule_validation():
         policy.validate(None, num_steps=5)
     with pytest.raises(ValueError, match="every mask update"):
         policy.validate(MidpointAttentionDifference([0], [1], num_blocks=1), num_steps=5)
+    assert list(policy.update_steps) == [0, 1, 2, 3]  # Every injected step; frozen masks stop at the cut.
+    assert list(PerStepAttentionMask(5, front=0, cut=1, freeze=True).update_steps) == [0, 1]
     for percentiles in ((50,), (98, 50), (-1, 98), (50, 101)):
         with pytest.raises(ValueError, match="Percentiles"):
             PerStepAttentionMask(5, front=0, cut=1, percentiles=percentiles)

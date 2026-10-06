@@ -104,17 +104,19 @@ class MidpointAttentionDifference:
 
 
 class PerStepAttentionMask:
-    """Turn each step's attention-difference map into a soft mask, then freeze it.
+    """Turn each step's attention-difference map into a soft mask.
 
     All indices refer to the forward denoising schedule: `front` steps inject the source
-    everywhere, the mask is updated from `front` to `cut` and reused until the uninjected
-    tail. A map is smoothed, clipped to the range between two percentiles, rescaled to
-    [0, 1] and passed through a sigmoid. The soft values weight V, and patches above 0.5
+    everywhere, then the mask is updated at every injected step. With `freeze` it is
+    updated only from `front` to `cut` and reused until the uninjected tail. A map is
+    smoothed, clipped to the range between two percentiles, rescaled to [0, 1] and passed
+    through a sigmoid. The soft values weight V, and patches above 0.5
     take the target K.
     """
 
     def __init__(self, num_steps: int, front: int, cut: int, tail: int = 1, sigma: float = 0.7,
-                 percentiles: tuple[float, float] = (50, 98), center: float = 0.3, steepness: float = 15):
+                 percentiles: tuple[float, float] = (50, 98), center: float = 0.3, steepness: float = 15,
+                 freeze: bool = False):
         self.sigma = sigma
         self.percentiles = tuple(percentiles)
         self.center = center
@@ -125,11 +127,12 @@ class PerStepAttentionMask:
             raise ValueError("Steepness must be positive")
         self.num_steps = num_steps
         self.front = front
+        self.freeze = freeze
         self.freeze_step = cut
         self.inject_end = num_steps - tail
         if not 0 <= front <= cut < self.inject_end <= num_steps:
             raise ValueError("Attention difference requires a nonempty mask window before the uninjected tail")
-        self.update_steps = range(front, cut + 1)
+        self.update_steps = range(front, (cut if freeze else self.inject_end - 1) + 1)
         self.soft = None  # soft mask of the latest update
         self.mask = None  # its patches above 0.5
         self.mask_step = None

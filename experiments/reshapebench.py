@@ -35,8 +35,9 @@ SUBSETS = {"single": "single_object", "multi": "multi_object"}
 COMMON = "--name flux-dev --num_steps 15 --controlnet_type none --offload"
 METHODS = {
     "fys": COMMON + " --guidance 2 --front 2 --inject 3",  # original FYS path: no attention-difference flags
-    # Per-step soft masks (P50-P98 range, sigmoid centre 0.3, steepness 15), guidance 2, front 0, inject 3: the defaults.
-    "attn_q_f0": COMMON + " --attn_diff",
+    # Per-step soft masks (P50-P98 range, sigmoid centre 0.3, steepness 15), guidance 2, front 0, inject 3: the defaults,
+    # with the mask frozen after step 9 as when these runs were made.
+    "attn_q_f0": COMMON + " --attn_diff --attn_diff_freeze",
 }
 # Upper anchor at P90: weaker signal reaches the mask (larger masks).
 METHODS["attn_q_f0_p90"] = METHODS["attn_q_f0"] + " --attn_diff_percentiles 50,90"

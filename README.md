@@ -203,15 +203,17 @@ in the original single-stream injection blocks: V is blended as
 `mask * V_target + (1 - mask) * V_source`, and K is taken from the target where
 `mask > 0.5` (that is, `u > center`) and from the source elsewhere.
 
-**Schedule.** Masks are updated up to the original TDM window end,
-`cut = num_steps - inject - 3` (the CLI uses a one-step uninjected tail), then
-frozen. For `num_steps=15` and the defaults:
+**Schedule.** A fresh soft mask is computed and applied at every injected step
+(the CLI uses a one-step uninjected tail). For `num_steps=15` and the defaults:
 
 | Steps (zero-based) | K/V behavior |
 | --- | --- |
-| 0–9 | Fresh soft mask at every step, applied immediately |
-| 10–13 | Frozen mask from step 9 |
+| 0–13 | Fresh soft mask at every step, applied immediately |
 | 14 | Original uninjected final step |
+
+With `--attn_diff_freeze`, masks are updated only up to the original TDM window end,
+`cut = num_steps - inject - 3` (step 9 for the defaults), and that mask is reused for
+the remaining injected steps (10–13).
 
 With `--front N`, the first `N` steps instead inject the source everywhere
 (respecting an optional input mask), as in the original method.
@@ -225,6 +227,7 @@ With `--front N`, the first `N` steps instead inject the source everywhere
 | `--attn_diff_percentiles` | `50,98` | lower and upper percentiles rescaled to 0 and 1 |
 | `--attn_diff_center` | `0.3` | rescaled value where the mask is 0.5; lower values give larger masks |
 | `--attn_diff_steepness` | `15` | sigmoid steepness; higher values give a harder mask edge |
+| `--attn_diff_freeze` | off | stop updating the mask after the original TDM window and reuse it for the remaining injected steps |
 
 **Outputs.** Visualizations are saved to `--vis_path`, or to
 `<output_dir>/attn_diff_visualization` when that option is omitted:
@@ -233,8 +236,8 @@ With `--front N`, the first `N` steps instead inject the source everywhere
 - `masks/soft_edit_map_<step>.png`: the smoothed map of each mask-update step.
 - `masks/edit_map_<step>.png` and `.npy`: the patches above 0.5 at that step, with
   1 meaning target K and 0 meaning source K. The uninjected tail is all 1.
-- `edit_map.png`, `edit_map.npy`, `soft_edit_map.png`, `soft_mask.npy`: the final
-  frozen mask, its smoothed map, and its soft values.
+- `edit_map.png`, `edit_map.npy`, `soft_edit_map.png`, `soft_mask.npy`: the mask
+  of the last update step, its smoothed map, and its soft values.
 - `mask_diagnostics.json`: injection/update status, editable area, changed patch
   count versus the previous step, and raw difference statistics at each step.
 - `attn_diff_config.json`: selected blocks, midpoint times, schedule, and soft-mask

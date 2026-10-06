@@ -271,14 +271,16 @@ def main(
             info['dynamic_mask'] = PerStepAttentionMask(
                 len(timesteps) - 1, args.front, cut, tail=1, sigma=args.attn_diff_sigma,
                 percentiles=args.attn_diff_percentiles, center=args.attn_diff_center, steepness=args.attn_diff_steepness,
+                freeze=args.attn_diff_freeze,
             )
-            # Visualizations include every interval; only the update window determines the masks.
-            capture_steps = range(len(timesteps) - 1) if info.get('vis_path') else range(args.front, cut + 1)
+            # Visualizations include every interval; only the update steps determine the masks.
+            capture_steps = range(len(timesteps) - 1) if info.get('vis_path') else info['dynamic_mask'].update_steps
             info['attn_diff'] = MidpointAttentionDifference(
                 args.attn_diff_layers, capture_steps, num_blocks=len(model.double_blocks),
             )
             print(f"Attention difference: midpoint outputs, zero-based blocks {args.attn_diff_layers}")
-            print(f"Soft masks: update steps {list(info['dynamic_mask'].update_steps)}, then freeze; percentiles "
+            print(f"Soft masks: update steps {list(info['dynamic_mask'].update_steps)}"
+                  f"{', then freeze' if args.attn_diff_freeze else ''}; percentiles "
                   f"{args.attn_diff_percentiles}, center {args.attn_diff_center}, steepness {args.attn_diff_steepness}")
             print(f"Attention difference visualizations: {info['vis_path']}")
 
@@ -423,6 +425,9 @@ def parse_args(argv=None):
                         help='rescaled value where the soft mask is 0.5; patches above it take the target K')
     parser.add_argument('--attn_diff_steepness', type=float, default=15,
                         help='steepness of the sigmoid that turns the rescaled map into the soft mask')
+    parser.add_argument('--attn_diff_freeze', action='store_true',
+                        help='update the mask only up to the original TDM window end (num_steps - inject - 3) and reuse '
+                             'it for the remaining injected steps; by default it is updated at every injected step')
 
     args = parser.parse_args(argv)
     # Attention Difference runs with its own schedule unless values are given explicitly.
