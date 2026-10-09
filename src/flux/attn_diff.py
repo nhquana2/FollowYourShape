@@ -56,10 +56,14 @@ class MidpointAttentionDifference:
     against the target trajectory under the target prompt. "source" and "target": that one
     latent (the inversion midpoint, or the target probe's midpoint) under both prompts, with
     `cond` holding the model inputs (txt, txt_ids, y) of the prompt its trajectory does not use.
+
+    `signal` selects the map the masks are built from. "attention": the difference above.
+    "velocity": the velocity difference of the original TDM (the inversion velocity against the
+    target probe's), which the sampler computes itself; no attention is collected then.
     """
 
     def __init__(self, layers: Iterable[int], steps: Iterable[int], num_blocks: int,
-                 latent: str = "cross", cond: dict[str, Tensor] | None = None):
+                 latent: str = "cross", cond: dict[str, Tensor] | None = None, signal: str = "attention"):
         self.layers = tuple(layers)
         if (
             not self.layers
@@ -71,15 +75,20 @@ class MidpointAttentionDifference:
             raise ValueError("Attention latent must be cross, source or target")
         if latent != "cross" and cond is None:
             raise ValueError("Same-latent attention difference requires the other prompt's conditioning")
+        if signal not in ("attention", "velocity"):
+            raise ValueError("Mask signal must be attention or velocity")
+        if signal == "velocity" and latent != "cross":
+            raise ValueError("The latent option applies to the attention signal only")
         self.latent = latent
         self.cond = cond
+        self.signal = signal
         self.steps = frozenset(steps)
         self.source: dict[int, dict[int, Tensor]] = {}
         self.midpoints: dict[int, float] = {}
         self.delta: dict[int, Tensor] = {}  # source-latent differences, known since inversion
 
     def source_collector(self, step: int, midpoint: float) -> Callable[[int, Tensor], None] | None:
-        if step not in self.steps:
+        if step not in self.steps or self.signal == "velocity":
             return None
         if step in self.source:
             raise RuntimeError(f"Source attention already recorded for interval {step}")
@@ -102,7 +111,7 @@ class MidpointAttentionDifference:
                 raise RuntimeError(f"Missing source attention at interval {step}, blocks {sorted(missing)}")
 
     def target_collector(self, step: int, midpoint: float) -> StepAttentionDifference | None:
-        if step not in self.steps:
+        if step not in self.steps or self.signal == "velocity":
             return None
         if step not in self.source:
             raise RuntimeError(f"No inversion attention cache for interval {step}; run inversion first")

@@ -357,6 +357,7 @@ def denoise_with_TDM(
             with open(os.path.join(vis_dir, 'attn_diff_config.json'), 'w', encoding='utf-8') as stream:
                 json.dump({
                     'evaluation': 'midpoint',
+                    'signal': attn_diff.signal,
                     'latent': attn_diff.latent,
                     'source_midpoints': attn_diff.midpoints,
                     'block_indices_zero_based': list(attn_diff.layers),
@@ -415,7 +416,8 @@ def denoise_with_TDM(
         pred_tar = (pred_mid_test + pred_tar) / 2
 
 
-        if attn_diff is None:
+        if attn_diff is None or attn_diff.signal == 'velocity':
+            # The velocity signal keeps the per-step masks and only replaces the map they are built from.
             delta = (pred_src - pred_tar).pow(2).sum(dim=-1).sqrt()
         else:
             # The same-latent variants compare one latent under both prompts instead of the two trajectories.

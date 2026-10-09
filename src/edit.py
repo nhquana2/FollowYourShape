@@ -281,9 +281,13 @@ def main(
             info['attn_diff'] = MidpointAttentionDifference(
                 args.attn_diff_layers, capture_steps, num_blocks=len(model.double_blocks),
                 latent=args.attn_diff_latent, cond={'txt': other['txt'], 'txt_ids': other['txt_ids'], 'y': other['vec']},
+                signal=args.attn_diff_signal,
             )
-            print(f"Attention difference: midpoint outputs, {args.attn_diff_latent} latent, "
-                  f"zero-based blocks {args.attn_diff_layers}")
+            if args.attn_diff_signal == 'velocity':
+                print("Mask signal: velocity difference of the original TDM (no attention is collected)")
+            else:
+                print(f"Attention difference: midpoint outputs, {args.attn_diff_latent} latent, "
+                      f"zero-based blocks {args.attn_diff_layers}")
             print(f"Soft masks: update steps {list(info['dynamic_mask'].update_steps)}"
                   f"{', aggregated' if args.attn_diff_aggregate else ', then freeze' if args.attn_diff_freeze else ''}"
                   f"; percentiles "
@@ -423,6 +427,9 @@ def parse_args(argv=None):
                              'K/V injection outside the mask at every step, instead of the original velocity TDM')
     parser.add_argument('--attn_diff_layers', type=parse_attn_layers, default=tuple(range(19)),
                         help='comma-separated zero-based double-stream blocks for attention difference (default: 0-18)')
+    parser.add_argument('--attn_diff_signal', choices=['attention', 'velocity'], default='attention',
+                        help='map the per-step masks are built from: attention = the attention difference; velocity = '
+                             'the velocity difference of the original TDM, with the same masks, schedule and injection')
     parser.add_argument('--attn_diff_latent', choices=['cross', 'source', 'target'], default='cross',
                         help='what the attention difference compares: cross = source trajectory under the source prompt '
                              'vs target trajectory under the target prompt; source / target = that one latent under both '

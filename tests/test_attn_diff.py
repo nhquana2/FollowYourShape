@@ -141,7 +141,7 @@ class TinyProbeModel:
 
 
 def run_tiny_edit(vis_path, attention=True, constant_attention=False, captured_steps=None,
-                  front=0, schedule=None, latent="cross", **mask_options):
+                  front=0, schedule=None, latent="cross", signal="attention", **mask_options):
     # A nonuniform schedule catches incorrectly paired inversion intervals.
     if schedule is None:
         schedule = [1.0, 0.8, 0.55, 0.3, 0.1, 0.0]
@@ -160,7 +160,7 @@ def run_tiny_edit(vis_path, attention=True, constant_attention=False, captured_s
         other = (2 if latent == "source" else 1) * inputs["txt"]
         info["attn_diff"] = MidpointAttentionDifference(
             [0, 2], steps, num_blocks=3, latent=latent,
-            cond=dict(txt=other, txt_ids=inputs["txt_ids"], y=inputs["vec"]),
+            cond=dict(txt=other, txt_ids=inputs["txt_ids"], y=inputs["vec"]), signal=signal,
         )
         info["dynamic_mask"] = PerStepAttentionMask(num_steps, front, num_steps - 4, tail=1, **mask_options)
     model = TinyProbeModel(constant_attention, vary_attention=attention)
@@ -190,6 +190,7 @@ def test_midpoint_pairing_of_inversion_and_target_probes(tmp_path):
     assert torch.isfinite(result).all()
     config = json.loads((tmp_path / "attn_diff_config.json").read_text())
     assert config["evaluation"] == "midpoint"
+    assert config["signal"] == "attention"
     assert config["block_indices_zero_based"] == [0, 2]
     assert config["soft_mask"] == {"gaussian_sigma": 0.7, "percentiles": [50, 98], "center": 0.3, "steepness": 15}
 
@@ -241,3 +242,28 @@ def test_default_velocity_path_does_not_collect_attention(tmp_path):
     assert info["edit_map"] is not None
     assert (tmp_path / "edit_map.png").is_file()
     assert not (tmp_path / "attn_diff_config.json").exists()
+
+
+def test_velocity_signal_builds_per_step_masks_from_the_original_tdm_map(tmp_path):
+    reference, _, _, schedule = run_tiny_edit(tmp_path / "tdm", attention=False)
+    result, info, model, _ = run_tiny_edit(tmp_path / "velocity", signal="velocity")
+    num_steps = len(schedule) - 1
+    assert len(model.calls) == 6 * num_steps
+    assert not any(call["capture"] for call in model.calls)
+    assert not info["attn_diff"].source
+    # The tiny model's velocity ignores injection, so both runs follow one trajectory and share their maps.
+    torch.testing.assert_close(result, reference, rtol=0, atol=0)
+    for step in range(num_steps):
+        name = f"delta/delta_map_{step}.png"
+        assert np.array_equal(np.array(Image.open(tmp_path / "velocity" / name)),
+                              np.array(Image.open(tmp_path / "tdm" / name)))
+    config = json.loads((tmp_path / "velocity" / "attn_diff_config.json").read_text())
+    assert config["signal"] == "velocity"
+    assert config["injection_steps_zero_based"] == list(range(num_steps - 1))
+    diagnostics = json.loads((tmp_path / "velocity" / "mask_diagnostics.json").read_text())
+    assert [item["mask_updated"] for item in diagnostics] == [True] * (num_steps - 1) + [False]
+    assert all(item["raw_divergence"]["max"] > 0 for item in diagnostics)
+    with pytest.raises(ValueError, match="attention or velocity"):
+        MidpointAttentionDifference([0], [0], num_blocks=1, signal="both")
+    with pytest.raises(ValueError, match="attention signal"):
+        MidpointAttentionDifference([0], [0], num_blocks=1, latent="source", cond={}, signal="velocity")

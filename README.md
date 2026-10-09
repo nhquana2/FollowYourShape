@@ -195,6 +195,11 @@ inversion midpoint latent, under the source prompt and under the target prompt
 the target prompt and under the source prompt (target guidance). Only the prompt
 differs between the two sides, at the cost of one extra model pass per captured step.
 
+`--attn_diff_signal velocity` keeps the per-step soft masks, schedule and injection but
+builds each mask from the velocity difference of the original TDM (inversion velocity
+against the target probe's) instead of the attention difference; no attention is
+collected, and `--attn_diff_layers` and `--attn_diff_latent` do not apply.
+
 **Soft mask.** Each map is min-max normalized, Gaussian-smoothed, clipped to the
 range between two of its percentiles, rescaled to `[0, 1]`, and passed through a
 sigmoid:
@@ -234,6 +239,7 @@ With `--front N`, the first `N` steps instead inject the source everywhere
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--attn_diff_layers` | `0,...,18` | zero-based double-stream blocks used for the signal (FLUX.1-dev has 19) |
+| `--attn_diff_signal` | `attention` | map the masks are built from: `attention`, or `velocity` (the original TDM's velocity difference) |
 | `--attn_diff_latent` | `cross` | `cross`: source trajectory vs target trajectory; `source` / `target`: that one latent under both prompts |
 | `--attn_diff_sigma` | `0.7` | Gaussian sigma in patches before the soft mask (0 disables smoothing) |
 | `--attn_diff_percentiles` | `50,98` | lower and upper percentiles rescaled to 0 and 1 |
