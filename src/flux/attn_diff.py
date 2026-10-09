@@ -113,11 +113,14 @@ class PerStepAttentionMask:
     through a sigmoid. The soft values weight V, and patches above 0.5
     take the target K. The first `free_steps` mask updates run without injection (every
     patch keeps the target K/V); their masks are still computed.
+    With `aggregate` the original three-stage schedule is kept: the maps from `front` to `cut`
+    are collected without injection, combined by the softmax-weighted sum of the original TDM
+    into one soft mask, and that mask is applied from `cut + 2` until the uninjected tail.
     """
 
     def __init__(self, num_steps: int, front: int, cut: int, tail: int = 1, sigma: float = 0.7,
                  percentiles: tuple[float, float] = (50, 98), center: float = 0.3, steepness: float = 15,
-                 free_steps: int = 0, freeze: bool = False):
+                 free_steps: int = 0, freeze: bool = False, aggregate: bool = False):
         self.sigma = sigma
         self.percentiles = tuple(percentiles)
         self.center = center
@@ -128,15 +131,20 @@ class PerStepAttentionMask:
             raise ValueError("Steepness must be positive")
         self.num_steps = num_steps
         self.front = front
-        self.freeze = freeze
+        self.aggregate = aggregate
+        self.freeze = freeze or aggregate
         self.freeze_step = cut
         self.inject_end = num_steps - tail
         if not 0 <= front <= cut < self.inject_end <= num_steps:
             raise ValueError("Attention difference requires a nonempty mask window before the uninjected tail")
-        self.update_steps = range(front, (cut if freeze else self.inject_end - 1) + 1)
+        self.update_steps = range(front, (cut if self.freeze else self.inject_end - 1) + 1)
         if not 0 <= free_steps <= len(self.update_steps):
             raise ValueError(f"free_steps must be between 0 and {len(self.update_steps)}")
-        self.free_steps = range(front, front + free_steps)
+        if aggregate and free_steps:
+            raise ValueError("free_steps does not apply to an aggregated mask")
+        # The original schedule injects neither in the mask window nor in the step after it.
+        self.free_steps = range(front, cut + 2 if aggregate else front + free_steps)
+        self.maps = []  # window maps awaiting aggregation
         self.soft = None  # soft mask of the latest update
         self.mask = None  # its patches above 0.5
         self.mask_step = None
@@ -181,11 +189,21 @@ class PerStepAttentionMask:
         if updated:
             if delta_map is None:
                 raise RuntimeError(f"Missing attention map for mask step {step}")
+            device = delta_map.device
+            if self.aggregate:
+                self.maps.append(delta_map.detach().float().cpu())
+                updated = step == self.freeze_step
+                if updated:
+                    # Softmax-weighted sum over the window, as in the original TDM.
+                    stack = torch.stack(self.maps)
+                    delta_map = (stack * torch.softmax(5 * stack, dim=0)).sum(dim=0)
+                    self.maps = []
+        if updated:
             smoothed = self.smooth(delta_map)
             self.soft = self.soft_mask(smoothed)
             self.mask = (self.soft > 0.5).astype(np.uint8)
             self.mask_step = step
-            edit_indices = torch.from_numpy(np.flatnonzero(self.mask)).to(delta_map.device)
+            edit_indices = torch.from_numpy(np.flatnonzero(self.mask)).to(device)
 
         if not self.injects(step):
             # No source injection means all patches retain target KV.

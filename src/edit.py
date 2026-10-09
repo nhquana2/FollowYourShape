@@ -272,6 +272,7 @@ def main(
                 len(timesteps) - 1, args.front, cut, tail=1, sigma=args.attn_diff_sigma,
                 percentiles=args.attn_diff_percentiles, center=args.attn_diff_center, steepness=args.attn_diff_steepness,
                 free_steps=args.attn_diff_free_steps, freeze=args.attn_diff_freeze,
+                aggregate=args.attn_diff_aggregate,
             )
             # Visualizations include every interval; only the update steps determine the masks.
             capture_steps = range(len(timesteps) - 1) if info.get('vis_path') else info['dynamic_mask'].update_steps
@@ -280,7 +281,8 @@ def main(
             )
             print(f"Attention difference: midpoint outputs, zero-based blocks {args.attn_diff_layers}")
             print(f"Soft masks: update steps {list(info['dynamic_mask'].update_steps)}"
-                  f"{', then freeze' if args.attn_diff_freeze else ''}; percentiles "
+                  f"{', aggregated' if args.attn_diff_aggregate else ', then freeze' if args.attn_diff_freeze else ''}"
+                  f"; percentiles "
                   f"{args.attn_diff_percentiles}, center {args.attn_diff_center}, steepness {args.attn_diff_steepness}")
             print(f"Attention difference visualizations: {info['vis_path']}")
 
@@ -428,6 +430,9 @@ def parse_args(argv=None):
     parser.add_argument('--attn_diff_freeze', action='store_true',
                         help='update the mask only up to the original TDM window end (num_steps - inject - 3) and reuse '
                              'it for the remaining injected steps; by default it is updated at every injected step')
+    parser.add_argument('--attn_diff_aggregate', action='store_true',
+                        help='original three-stage schedule: collect the maps of the TDM window without injection, '
+                             'aggregate them into one soft mask and inject with it only in the last --inject steps')
     parser.add_argument('--attn_diff_free_steps', type=int, default=0,
                         help='skip K/V injection (all K/V from the target) for the first N mask-update steps')
 

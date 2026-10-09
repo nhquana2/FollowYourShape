@@ -353,6 +353,7 @@ def denoise_with_TDM(
                     'block_indices_zero_based': list(attn_diff.layers),
                     'mask_update_steps_zero_based': list(dynamic_mask.update_steps),
                     'freeze_step_zero_based': cut if dynamic_mask.freeze else None,
+                    'aggregate': dynamic_mask.aggregate,
                     'injection_steps_zero_based': [i for i in range(len(timesteps) - 1) if dynamic_mask.injects(i)],
                     'step_times': timesteps,
                     'target_guidance': guidance,

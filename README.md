@@ -215,6 +215,11 @@ With `--attn_diff_freeze`, masks are updated only up to the original TDM window 
 `cut = num_steps - inject - 3` (step 9 for the defaults), and that mask is reused for
 the remaining injected steps (10–13).
 
+With `--attn_diff_aggregate`, the original three-stage schedule is kept: the maps of
+the TDM window (steps `front`–`cut`, 0–9 for the defaults) are collected without injection,
+combined by the softmax-weighted sum of the original TDM, and turned into one soft mask
+that is applied only in the last `--inject` steps (11–13).
+
 With `--front N`, the first `N` steps instead inject the source everywhere
 (respecting an optional input mask), as in the original method.
 
@@ -228,6 +233,7 @@ With `--front N`, the first `N` steps instead inject the source everywhere
 | `--attn_diff_center` | `0.3` | rescaled value where the mask is 0.5; lower values give larger masks |
 | `--attn_diff_steepness` | `15` | sigmoid steepness; higher values give a harder mask edge |
 | `--attn_diff_freeze` | off | stop updating the mask after the original TDM window and reuse it for the remaining injected steps |
+| `--attn_diff_aggregate` | off | original schedule: no injection in the TDM window, one soft mask from the aggregated window maps, injection only in the last `--inject` steps |
 | `--attn_diff_free_steps` | `0` | skip K/V injection for the first N mask-update steps (every patch keeps the target K/V); their masks are still computed |
 
 **Outputs.** Visualizations are saved to `--vis_path`, or to

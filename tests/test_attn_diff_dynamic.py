@@ -236,3 +236,44 @@ def test_free_steps_skip_injection_but_still_update_masks(tmp_path):
     assert config["free_steps_zero_based"] == [1, 2]
     with pytest.raises(ValueError, match="free_steps"):
         PerStepAttentionMask(7, front=1, cut=3, free_steps=6)
+
+
+def test_aggregate_collects_the_window_without_injection_and_injects_in_the_last_stage(tmp_path):
+    schedule = [1.0, 0.9, 0.75, 0.6, 0.4, 0.25, 0.1, 0.0]
+    _, info, model, _ = run_tiny_edit(tmp_path, front=1, schedule=schedule, aggregate=True)
+    num_steps = len(schedule) - 1
+    assert len(model.calls) == num_steps * 6  # No additional model evaluations.
+    assert not model.kv_cache and not info["attn_diff"].source
+    controlled = [call for call in model.calls if call["controlled"] and not call["inverse"]]
+    injected = [controlled[2 * step]["inject"] for step in range(num_steps)]
+    assert injected == [True, False, False, False, False, True, False]  # Front, window and gap, last stage, tail.
+    masks = [np.load(tmp_path / "masks" / f"edit_map_{i}.npy") for i in range(num_steps)]
+    assert not masks[0].any() and all(mask.all() for mask in masks[1:5])
+    np.testing.assert_array_equal(masks[5], np.load(tmp_path / "edit_map.npy"))
+    for call in controlled[10:12]:
+        assert call["edit_indices"] == np.flatnonzero(masks[5]).tolist()
+        assert np.flatnonzero(np.array(call["edit_weight"]) > 0.5).tolist() == call["edit_indices"]
+    assert all(call["edit_weight"] is None for call in controlled[:10])
+    diagnostics = json.loads((tmp_path / "mask_diagnostics.json").read_text())
+    assert [item["step"] for item in diagnostics if item["mask_updated"]] == [3]
+    assert [item["step"] for item in diagnostics if item["frozen"]] == [5]
+    config = json.loads((tmp_path / "attn_diff_config.json").read_text())
+    assert config["aggregate"] and config["freeze_step_zero_based"] == 3
+    assert config["mask_update_steps_zero_based"] == [1, 2, 3]
+    assert config["injection_steps_zero_based"] == [0, 5]
+
+
+def test_aggregate_mask_is_the_soft_mask_of_the_softmax_weighted_window():
+    torch.manual_seed(3)
+    maps = torch.rand(3, 2, 3)
+    policy = PerStepAttentionMask(7, front=1, cut=3, aggregate=True, sigma=0)
+    assert policy.process(0, None, None, (2, 3)) is None
+    for step in (1, 2):
+        assert policy.process(step, maps[step - 1], None, (2, 3)) is None
+        assert policy.mask is None
+    indices = policy.process(3, maps[2], None, (2, 3))
+    expected = policy.soft_mask((maps * torch.softmax(5 * maps, dim=0)).sum(dim=0).numpy())
+    np.testing.assert_allclose(policy.soft, expected, rtol=1e-6)
+    assert indices.tolist() == np.flatnonzero(expected > 0.5).tolist()
+    with pytest.raises(ValueError, match="free_steps"):
+        PerStepAttentionMask(7, front=1, cut=3, aggregate=True, free_steps=1)
