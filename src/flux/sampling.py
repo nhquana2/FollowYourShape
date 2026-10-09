@@ -261,7 +261,7 @@ def denoise(
         attn_diff = info.get('attn_diff') if info is not None else None
         source_step = len(timesteps) - i - 2
         capture = None
-        if inverse and attn_diff is not None:
+        if inverse and attn_diff is not None and attn_diff.latent != 'target':
             capture = attn_diff.source_collector(source_step, (t_curr + t_prev) / 2)
         capture_kwargs = {'attn_capture': capture} if capture is not None else {}
 
@@ -279,8 +279,16 @@ def denoise(
             **capture_kwargs,
         )
 
-        if inverse and attn_diff is not None:
+        if capture is not None:
             attn_diff.validate_source(source_step)
+            if attn_diff.latent == 'source':
+                # Same latent under the target prompt: the difference is already known during inversion.
+                attn_diff.delta[source_step] = attn_diff.other_prompt_delta(
+                    model, source_step, (t_curr + t_prev) / 2, img=img_mid, img_ids=img_ids,
+                    timesteps=t_vec_mid, guidance=guidance_vec,
+                    controlnet_block_samples=controlnet_block_samples_mid,
+                    controlnet_single_block_samples=controlnet_single_block_samples_mid,
+                ).cpu()
 
         first_order = (pred_mid - pred) / ((t_prev - t_curr) / 2)
         img = img + (t_prev - t_curr) * pred + 0.5 * (t_prev - t_curr) ** 2 * first_order
@@ -349,6 +357,7 @@ def denoise_with_TDM(
             with open(os.path.join(vis_dir, 'attn_diff_config.json'), 'w', encoding='utf-8') as stream:
                 json.dump({
                     'evaluation': 'midpoint',
+                    'latent': attn_diff.latent,
                     'source_midpoints': attn_diff.midpoints,
                     'block_indices_zero_based': list(attn_diff.layers),
                     'mask_update_steps_zero_based': list(dynamic_mask.update_steps),
@@ -389,7 +398,7 @@ def denoise_with_TDM(
         )
         img_mid_test = img + (t_prev - t_curr) / 2 * pred_tar
         t_vec_mid = torch.full((img.shape[0],), (t_curr + (t_prev - t_curr) / 2), dtype=img.dtype, device=img.device)
-        capture = attn_diff.target_collector(i, (t_curr + t_prev) / 2) if attn_diff is not None else None
+        capture = attn_diff.probe_collector(i, (t_curr + t_prev) / 2) if attn_diff is not None else None
         capture_kwargs = {'attn_capture': capture} if capture is not None else {}
         pred_mid_test, _ = model(
             img=img_mid_test,
@@ -409,7 +418,11 @@ def denoise_with_TDM(
         if attn_diff is None:
             delta = (pred_src - pred_tar).pow(2).sum(dim=-1).sqrt()
         else:
-            delta = capture.result() if capture is not None else None
+            # The same-latent variants compare one latent under both prompts instead of the two trajectories.
+            delta = attn_diff.probe_delta(
+                model, i, (t_curr + t_prev) / 2, capture, img=img_mid_test, img_ids=img_ids,
+                timesteps=t_vec_mid, guidance=guidance_vec,
+            )
 
         delta_map = None
         if delta is not None:

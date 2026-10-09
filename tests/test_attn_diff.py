@@ -141,7 +141,7 @@ class TinyProbeModel:
 
 
 def run_tiny_edit(vis_path, attention=True, constant_attention=False, captured_steps=None,
-                  front=0, schedule=None, **mask_options):
+                  front=0, schedule=None, latent="cross", **mask_options):
     # A nonuniform schedule catches incorrectly paired inversion intervals.
     if schedule is None:
         schedule = [1.0, 0.8, 0.55, 0.3, 0.1, 0.0]
@@ -156,7 +156,12 @@ def run_tiny_edit(vis_path, attention=True, constant_attention=False, captured_s
     )
     if attention:  # Attention Difference always runs with its per-step masks.
         steps = range(num_steps) if captured_steps is None else captured_steps
-        info["attn_diff"] = MidpointAttentionDifference([0, 2], steps, num_blocks=3)
+        # The target prompt is twice the source one; a same-latent difference needs the other of the two.
+        other = (2 if latent == "source" else 1) * inputs["txt"]
+        info["attn_diff"] = MidpointAttentionDifference(
+            [0, 2], steps, num_blocks=3, latent=latent,
+            cond=dict(txt=other, txt_ids=inputs["txt_ids"], y=inputs["vec"]),
+        )
         info["dynamic_mask"] = PerStepAttentionMask(num_steps, front, num_steps - 4, tail=1, **mask_options)
     model = TinyProbeModel(constant_attention, vary_attention=attention)
     noise, info = denoise(model, **inputs, timesteps=schedule, inverse=True, info=info,
@@ -187,6 +192,46 @@ def test_midpoint_pairing_of_inversion_and_target_probes(tmp_path):
     assert config["evaluation"] == "midpoint"
     assert config["block_indices_zero_based"] == [0, 2]
     assert config["soft_mask"] == {"gaussian_sigma": 0.7, "percentiles": [50, 98], "center": 0.3, "steepness": 15}
+
+
+@pytest.mark.parametrize("latent", ["source", "target"])
+def test_same_latent_compares_one_latent_under_both_prompts(tmp_path, latent):
+    result, info, model, schedule = run_tiny_edit(tmp_path, latent=latent)
+    num_steps = len(schedule) - 1
+    assert torch.isfinite(result).all()
+    assert len(model.calls) == 7 * num_steps  # One extra evaluation per captured step.
+    assert not info["attn_diff"].source and not info["attn_diff"].delta
+    inversion_calls = (3 if latent == "source" else 2) * num_steps
+    captured = [index for index, call in enumerate(model.calls) if call["capture"]]
+    assert len(captured) == 2 * num_steps
+    assert all((index < inversion_calls) == (latent == "source") for index in captured)
+    midpoints = [(a + b) / 2 for a, b in zip(schedule[:-1], schedule[1:])]
+    conditions = (1.0, 2.0) if latent == "source" else (2.0, 1.0)  # Trajectory prompt first, then the other.
+    for first, second, midpoint in zip(captured[::2], captured[1::2], midpoints[::-1] if latent == "source" else midpoints):
+        assert second == first + 1
+        first, second = model.calls[first], model.calls[second]
+        assert first["time"] == second["time"] == pytest.approx(midpoint)
+        torch.testing.assert_close(first["latent"], second["latent"], rtol=0, atol=0)
+        assert (first["condition"], second["condition"]) == conditions
+        assert first["controlled"] == (latent == "source") and not second["controlled"]
+    # Layer scales 1 and 3 average to 2; patch p differs by (p, p^2) between the two prompts.
+    diagnostics = json.loads((tmp_path / "mask_diagnostics.json").read_text())
+    for item in diagnostics:
+        assert item["raw_divergence"]["min"] == pytest.approx(2 * 2 ** 0.5)
+        assert item["raw_divergence"]["max"] == pytest.approx(2 * (36 + 1296) ** 0.5)
+    assert json.loads((tmp_path / "attn_diff_config.json").read_text())["latent"] == latent
+
+
+def test_same_latent_window_only_capture_and_validation():
+    for latent in ("source", "target"):
+        _, info, model, schedule = run_tiny_edit(None, captured_steps=[0, 1], freeze=True, latent=latent)
+        assert len(model.calls) == 6 * (len(schedule) - 1) + 2
+        assert sum(call["capture"] for call in model.calls) == 4
+        assert info["dynamic_mask"].mask_step == 1 and not info["attn_diff"].delta
+    with pytest.raises(ValueError, match="cross, source or target"):
+        MidpointAttentionDifference([0], [0], num_blocks=1, latent="both")
+    with pytest.raises(ValueError, match="conditioning"):
+        MidpointAttentionDifference([0], [0], num_blocks=1, latent="source")
 
 
 def test_default_velocity_path_does_not_collect_attention(tmp_path):

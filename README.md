@@ -189,6 +189,12 @@ output projection, gate, and residual addition, and does not modify them.
 Inversion guidance (1), solver updates, probe passes, and ControlNet behavior are
 unchanged. No extra model passes are introduced.
 
+`--attn_diff_latent` changes what is compared. With `source`, both sides are the
+inversion midpoint latent, under the source prompt and under the target prompt
+(inversion guidance); with `target`, both are the target-probe midpoint latent, under
+the target prompt and under the source prompt (target guidance). Only the prompt
+differs between the two sides, at the cost of one extra model pass per captured step.
+
 **Soft mask.** Each map is min-max normalized, Gaussian-smoothed, clipped to the
 range between two of its percentiles, rescaled to `[0, 1]`, and passed through a
 sigmoid:
@@ -228,6 +234,7 @@ With `--front N`, the first `N` steps instead inject the source everywhere
 | Option | Default | Meaning |
 | --- | --- | --- |
 | `--attn_diff_layers` | `0,...,18` | zero-based double-stream blocks used for the signal (FLUX.1-dev has 19) |
+| `--attn_diff_latent` | `cross` | `cross`: source trajectory vs target trajectory; `source` / `target`: that one latent under both prompts |
 | `--attn_diff_sigma` | `0.7` | Gaussian sigma in patches before the soft mask (0 disables smoothing) |
 | `--attn_diff_percentiles` | `50,98` | lower and upper percentiles rescaled to 0 and 1 |
 | `--attn_diff_center` | `0.3` | rescaled value where the mask is 0.5; lower values give larger masks |

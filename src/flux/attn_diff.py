@@ -51,9 +51,15 @@ class MidpointAttentionDifference:
 
     Inversion visits intervals in reverse order. Its midpoint outputs can be
     paired with the uninjected target probe at the same interval midpoint.
+
+    `latent` selects what is compared. "cross": the source trajectory under the source prompt
+    against the target trajectory under the target prompt. "source" and "target": that one
+    latent (the inversion midpoint, or the target probe's midpoint) under both prompts, with
+    `cond` holding the model inputs (txt, txt_ids, y) of the prompt its trajectory does not use.
     """
 
-    def __init__(self, layers: Iterable[int], steps: Iterable[int], num_blocks: int):
+    def __init__(self, layers: Iterable[int], steps: Iterable[int], num_blocks: int,
+                 latent: str = "cross", cond: dict[str, Tensor] | None = None):
         self.layers = tuple(layers)
         if (
             not self.layers
@@ -61,9 +67,16 @@ class MidpointAttentionDifference:
             or any(layer < 0 or layer >= num_blocks for layer in self.layers)
         ):
             raise ValueError(f"Attention layers must be unique indices in [0, {num_blocks - 1}]")
+        if latent not in ("cross", "source", "target"):
+            raise ValueError("Attention latent must be cross, source or target")
+        if latent != "cross" and cond is None:
+            raise ValueError("Same-latent attention difference requires the other prompt's conditioning")
+        self.latent = latent
+        self.cond = cond
         self.steps = frozenset(steps)
         self.source: dict[int, dict[int, Tensor]] = {}
         self.midpoints: dict[int, float] = {}
+        self.delta: dict[int, Tensor] = {}  # source-latent differences, known since inversion
 
     def source_collector(self, step: int, midpoint: float) -> Callable[[int, Tensor], None] | None:
         if step not in self.steps:
@@ -101,6 +114,30 @@ class MidpointAttentionDifference:
         # The collector consumes each layer as it is compared, releasing its CPU
         # storage instead of keeping all inversion features through denoising.
         return StepAttentionDifference(self.source.pop(step))
+
+    def other_prompt_delta(self, model, step: int, midpoint: float, **inputs) -> Tensor:
+        """Evaluate the cached evaluation's latent under the other prompt and return the difference."""
+        compare = self.target_collector(step, midpoint)
+        model(**inputs, **self.cond, info=None, attn_capture=compare)
+        return compare.result()
+
+    def probe_collector(self, step: int, midpoint: float) -> Callable[[int, Tensor], None] | None:
+        """Collector for the uninjected target probe of a denoising interval."""
+        if self.latent == "source":
+            return None
+        if self.latent == "target":  # The probe is the cached side; the source prompt is compared with it.
+            return self.source_collector(step, midpoint)
+        return self.target_collector(step, midpoint)
+
+    def probe_delta(self, model, step: int, midpoint: float, capture, **inputs) -> Tensor | None:
+        """Attention difference of a denoising interval, after its target probe ran with `capture`."""
+        if step not in self.steps:
+            return None
+        if self.latent == "source":
+            return self.delta.pop(step).to(inputs["img"].device)
+        if self.latent == "target":
+            return self.other_prompt_delta(model, step, midpoint, **inputs)
+        return capture.result()
 
 
 class PerStepAttentionMask:
